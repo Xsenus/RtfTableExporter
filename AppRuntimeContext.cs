@@ -10,6 +10,7 @@ internal sealed record AppRuntimeContext(
     string CurrentVersion,
     string? GitHubRepository,
     string RuntimeIdentifier,
+    string ObservedRuntimeIdentifier,
     string ReleasePackageId)
 {
     public bool CanSelfUpdate =>
@@ -24,7 +25,8 @@ internal sealed record AppRuntimeContext(
         var processPath = Environment.ProcessPath;
         var version = ResolveVersion(assembly);
         var repository = ResolveRepository(assembly, repositoryOverride);
-        var runtimeIdentifier = ResolveRuntimeIdentifier();
+        var observedRuntimeIdentifier = ResolveObservedRuntimeIdentifier();
+        var runtimeIdentifier = ResolveRuntimeIdentifier(observedRuntimeIdentifier);
 
         return new AppRuntimeContext(
             assemblyName,
@@ -33,6 +35,7 @@ internal sealed record AppRuntimeContext(
             version,
             repository,
             runtimeIdentifier,
+            observedRuntimeIdentifier,
             assemblyName);
     }
 
@@ -96,21 +99,40 @@ internal sealed record AppRuntimeContext(
         return parts.Length >= 2 ? $"{parts[0]}/{parts[1]}" : null;
     }
 
-    private static string ResolveRuntimeIdentifier()
+    private static string ResolveObservedRuntimeIdentifier()
     {
         var runtimeIdentifier = RuntimeInformation.RuntimeIdentifier;
-        if (!string.IsNullOrWhiteSpace(runtimeIdentifier) && !string.Equals(runtimeIdentifier, "unknown", StringComparison.OrdinalIgnoreCase))
+        return string.IsNullOrWhiteSpace(runtimeIdentifier) ? "unknown" : runtimeIdentifier;
+    }
+
+    private static string ResolveRuntimeIdentifier(string observedRuntimeIdentifier)
+    {
+        var architecture = ResolveArchitecture();
+        if (OperatingSystem.IsWindows())
         {
-            return runtimeIdentifier;
+            return $"win-{architecture}";
         }
 
-        var os = OperatingSystem.IsWindows()
-            ? "win"
-            : IsMusl()
+        if (OperatingSystem.IsLinux())
+        {
+            var os = IsMusl(observedRuntimeIdentifier)
                 ? "linux-musl"
                 : "linux";
 
-        var architecture = RuntimeInformation.ProcessArchitecture switch
+            return $"{os}-{architecture}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(observedRuntimeIdentifier) &&
+            !string.Equals(observedRuntimeIdentifier, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            return observedRuntimeIdentifier;
+        }
+
+        return $"unknown-{architecture}";
+    }
+
+    private static string ResolveArchitecture()
+        => RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.X64 => "x64",
             Architecture.Arm64 => "arm64",
@@ -119,10 +141,7 @@ internal sealed record AppRuntimeContext(
             _ => RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(),
         };
 
-        return $"{os}-{architecture}";
-    }
-
-    private static bool IsMusl()
+    private static bool IsMusl(string observedRuntimeIdentifier)
         => OperatingSystem.IsLinux() &&
-           RuntimeInformation.RuntimeIdentifier.Contains("musl", StringComparison.OrdinalIgnoreCase);
+           observedRuntimeIdentifier.Contains("musl", StringComparison.OrdinalIgnoreCase);
 }

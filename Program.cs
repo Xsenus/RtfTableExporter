@@ -74,6 +74,7 @@ internal static class Program
         Console.WriteLine("  - Data rows and 'Итого по коду БК' rows are written.");
         Console.WriteLine("  - Existing .txt files are overwritten when possible.");
         Console.WriteLine("  - If one file fails, the rest continue.");
+        Console.WriteLine("  - Auto-update requires write access to the executable directory.");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  -i, --input <path>         Add a file, directory, or wildcard mask.");

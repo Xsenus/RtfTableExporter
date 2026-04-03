@@ -22,6 +22,12 @@ internal static class GitHubReleaseUpdater
             return;
         }
 
+        if (!CanWriteToDirectory(context.BaseDirectory))
+        {
+            await SafeWriteLineAsync(log, $"UPDATE|Application directory is not writable: {context.BaseDirectory}");
+            return;
+        }
+
         var statePath = Path.Combine(context.BaseDirectory, ".rtftableexporter-update-state.json");
 
         try
@@ -40,7 +46,7 @@ internal static class GitHubReleaseUpdater
             var asset = SelectAsset(latestRelease, context);
             if (asset is null)
             {
-                await SafeWriteLineAsync(log, $"UPDATE|No compatible release asset was found for {context.RuntimeIdentifier}.");
+                await SafeWriteLineAsync(log, $"UPDATE|No compatible release asset was found for {DescribeRuntime(context)}.");
                 return;
             }
 
@@ -129,10 +135,30 @@ internal static class GitHubReleaseUpdater
 
     private static GitHubAsset? SelectAsset(GitHubRelease release, AppRuntimeContext context)
     {
-        var exactName = $"{context.ReleasePackageId}-{release.TagName}-{context.RuntimeIdentifier}.zip";
-        return release.Assets.FirstOrDefault(asset => string.Equals(asset.Name, exactName, StringComparison.OrdinalIgnoreCase))
-               ?? release.Assets.FirstOrDefault(asset =>
-                   asset.Name.EndsWith($"-{context.RuntimeIdentifier}.zip", StringComparison.OrdinalIgnoreCase));
+        foreach (var runtimeIdentifier in GetRuntimeIdentifierCandidates(context))
+        {
+            var exactName = $"{context.ReleasePackageId}-{release.TagName}-{runtimeIdentifier}.zip";
+            var exactMatch = release.Assets.FirstOrDefault(asset =>
+                string.Equals(asset.Name, exactName, StringComparison.OrdinalIgnoreCase));
+
+            if (exactMatch is not null)
+            {
+                return exactMatch;
+            }
+        }
+
+        foreach (var runtimeIdentifier in GetRuntimeIdentifierCandidates(context))
+        {
+            var suffixMatch = release.Assets.FirstOrDefault(asset =>
+                asset.Name.EndsWith($"-{runtimeIdentifier}.zip", StringComparison.OrdinalIgnoreCase));
+
+            if (suffixMatch is not null)
+            {
+                return suffixMatch;
+            }
+        }
+
+        return null;
     }
 
     private static async Task<bool> DownloadAndScheduleAsync(
@@ -162,44 +188,70 @@ internal static class GitHubReleaseUpdater
         ZipFile.ExtractToDirectory(archivePath, extractPath, overwriteFiles: true);
 
         var targetBinaryName = Path.GetFileName(processPath);
-        if (string.IsNullOrWhiteSpace(targetBinaryName) ||
-            !File.Exists(Path.Combine(extractPath, targetBinaryName)))
+        if (string.IsNullOrWhiteSpace(targetBinaryName))
         {
-            throw new InvalidOperationException($"Release asset {asset.Name} does not contain {targetBinaryName}.");
+            return false;
+        }
+
+        var sourceBinaryName = ResolveSourceBinaryName(extractPath, targetBinaryName, context.ApplicationName);
+        if (string.IsNullOrWhiteSpace(sourceBinaryName))
+        {
+            throw new InvalidOperationException(
+                $"Release asset {asset.Name} does not contain {targetBinaryName} or {GetCanonicalBinaryName(context.ApplicationName)}.");
         }
 
         var logPath = Path.Combine(context.BaseDirectory, ".rtftableexporter-update.log");
         if (OperatingSystem.IsWindows())
         {
             var scriptPath = Path.Combine(tempRoot, "apply-update.ps1");
-            await File.WriteAllTextAsync(scriptPath, BuildWindowsScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, targetBinaryName, logPath), cancellationToken);
+            await File.WriteAllTextAsync(
+                scriptPath,
+                BuildWindowsScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, sourceBinaryName, targetBinaryName, logPath),
+                cancellationToken);
             StartDetachedProcess("powershell", $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"");
             return true;
         }
 
         var shellScriptPath = Path.Combine(tempRoot, "apply-update.sh");
-        await File.WriteAllTextAsync(shellScriptPath, BuildLinuxScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, targetBinaryName, logPath), cancellationToken);
+        await File.WriteAllTextAsync(
+            shellScriptPath,
+            BuildLinuxScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, sourceBinaryName, targetBinaryName, logPath),
+            cancellationToken);
         StartDetachedProcess("/bin/sh", $"\"{shellScriptPath}\"");
         return true;
     }
 
-    private static string BuildWindowsScript(string sourceDirectory, string targetDirectory, int processId, string binaryName, string logPath)
+    private static string BuildWindowsScript(
+        string sourceDirectory,
+        string targetDirectory,
+        int processId,
+        string sourceBinaryName,
+        string targetBinaryName,
+        string logPath)
         => $$"""
 $ErrorActionPreference = "Stop"
 $source = '{{EscapePowerShell(sourceDirectory)}}'
 $target = '{{EscapePowerShell(targetDirectory)}}'
 $pidToWait = {{processId}}
 $log = '{{EscapePowerShell(logPath)}}'
+$sourceBinary = Join-Path $source '{{EscapePowerShell(sourceBinaryName)}}'
+$targetBinary = Join-Path $target '{{EscapePowerShell(targetBinaryName)}}'
+$sourceReadme = Join-Path $source 'README.md'
+$targetReadme = Join-Path $target 'README.md'
 
 try {
     while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {
         Start-Sleep -Milliseconds 500
     }
 
-    Copy-Item -Path (Join-Path $source '*') -Destination $target -Recurse -Force
-    $binary = Join-Path $target '{{EscapePowerShell(binaryName)}}'
-    if (Test-Path $binary) {
-        [System.IO.File]::SetAttributes($binary, [System.IO.FileAttributes]::Normal)
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    Copy-Item -LiteralPath $sourceBinary -Destination $targetBinary -Force
+    if (Test-Path $targetBinary) {
+        [System.IO.File]::SetAttributes($targetBinary, [System.IO.FileAttributes]::Normal)
+    }
+
+    if (Test-Path $sourceReadme) {
+        Copy-Item -LiteralPath $sourceReadme -Destination $targetReadme -Force
     }
 }
 catch {
@@ -210,7 +262,13 @@ finally {
 }
 """;
 
-    private static string BuildLinuxScript(string sourceDirectory, string targetDirectory, int processId, string binaryName, string logPath)
+    private static string BuildLinuxScript(
+        string sourceDirectory,
+        string targetDirectory,
+        int processId,
+        string sourceBinaryName,
+        string targetBinaryName,
+        string logPath)
         => $$"""
 #!/bin/sh
 set +e
@@ -218,14 +276,26 @@ SOURCE='{{EscapeShell(sourceDirectory)}}'
 TARGET='{{EscapeShell(targetDirectory)}}'
 PID_TO_WAIT={{processId}}
 LOG_FILE='{{EscapeShell(logPath)}}'
-BINARY_NAME='{{EscapeShell(binaryName)}}'
+SOURCE_BINARY_NAME='{{EscapeShell(sourceBinaryName)}}'
+TARGET_BINARY_NAME='{{EscapeShell(targetBinaryName)}}'
+SOURCE_BINARY="$SOURCE/$SOURCE_BINARY_NAME"
+TARGET_BINARY="$TARGET/$TARGET_BINARY_NAME"
 
 while kill -0 "$PID_TO_WAIT" 2>/dev/null; do
   sleep 1
 done
 
-cp -Rf "$SOURCE"/. "$TARGET"/ 2>>"$LOG_FILE"
-chmod +x "$TARGET/$BINARY_NAME" 2>>"$LOG_FILE"
+mkdir -p "$TARGET" 2>>"$LOG_FILE"
+if [ ! -f "$SOURCE_BINARY" ]; then
+  printf '%s\n' "Release binary was not found: $SOURCE_BINARY" >>"$LOG_FILE"
+  exit 1
+fi
+
+cp -f "$SOURCE_BINARY" "$TARGET_BINARY" 2>>"$LOG_FILE"
+chmod +x "$TARGET_BINARY" 2>>"$LOG_FILE"
+if [ -f "$SOURCE/README.md" ]; then
+  cp -f "$SOURCE/README.md" "$TARGET/README.md" 2>>"$LOG_FILE"
+fi
 rm -rf "$(dirname "$SOURCE")" >/dev/null 2>&1
 """;
 
@@ -248,6 +318,66 @@ rm -rf "$(dirname "$SOURCE")" >/dev/null 2>&1
 
     private static string EscapeShell(string value)
         => value.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+
+    private static IEnumerable<string> GetRuntimeIdentifierCandidates(AppRuntimeContext context)
+    {
+        yield return context.RuntimeIdentifier;
+
+        if (!string.IsNullOrWhiteSpace(context.ObservedRuntimeIdentifier) &&
+            !string.Equals(context.RuntimeIdentifier, context.ObservedRuntimeIdentifier, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(context.ObservedRuntimeIdentifier, "unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return context.ObservedRuntimeIdentifier;
+        }
+    }
+
+    private static string DescribeRuntime(AppRuntimeContext context)
+        => string.Equals(context.RuntimeIdentifier, context.ObservedRuntimeIdentifier, StringComparison.OrdinalIgnoreCase)
+            ? context.RuntimeIdentifier
+            : $"{context.RuntimeIdentifier} (reported as {context.ObservedRuntimeIdentifier})";
+
+    private static string? ResolveSourceBinaryName(string extractPath, string targetBinaryName, string applicationName)
+        => GetBinaryNameCandidates(targetBinaryName, applicationName)
+            .FirstOrDefault(candidate => File.Exists(Path.Combine(extractPath, candidate)));
+
+    private static IEnumerable<string> GetBinaryNameCandidates(string targetBinaryName, string applicationName)
+    {
+        yield return targetBinaryName;
+
+        var canonicalBinaryName = GetCanonicalBinaryName(applicationName);
+        if (!string.Equals(targetBinaryName, canonicalBinaryName, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return canonicalBinaryName;
+        }
+    }
+
+    private static string GetCanonicalBinaryName(string applicationName)
+        => OperatingSystem.IsWindows()
+            ? $"{applicationName}.exe"
+            : applicationName;
+
+    private static bool CanWriteToDirectory(string directoryPath)
+    {
+        try
+        {
+            Directory.CreateDirectory(directoryPath);
+            var probePath = Path.Combine(directoryPath, $".rtftableexporter-write-test-{Guid.NewGuid():N}.tmp");
+            using (File.Create(probePath, 1, FileOptions.DeleteOnClose))
+            {
+            }
+
+            if (File.Exists(probePath))
+            {
+                File.Delete(probePath);
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static async Task SafeWriteLineAsync(TextWriter writer, string message)
     {
