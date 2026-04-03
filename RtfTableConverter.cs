@@ -25,11 +25,10 @@ internal static class RtfTableConverter
             throw new InvalidOperationException("Only .rtf files are supported.");
         }
 
-        var largestTable = ExtractLargestTable(normalizedInputPath);
-        var liveRows = ExtractLiveRows(largestTable);
+        var liveRows = ExtractRowsForExport(normalizedInputPath);
         if (liveRows.Count == 0)
         {
-            throw new NoTablesFoundException("The largest table does not contain exportable data rows.");
+            throw new NoTablesFoundException("The input RTF file does not contain exportable data rows.");
         }
 
         var directory = Path.GetDirectoryName(normalizedOutputPath);
@@ -48,7 +47,7 @@ internal static class RtfTableConverter
             liveRows.Max(row => row.Count));
     }
 
-    private static TableData ExtractLargestTable(string inputPath)
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExport(string inputPath)
     {
         using var inputStream = File.OpenRead(inputPath);
         var html = Rtf.ToHtml(inputStream, new RtfHtmlSettings
@@ -60,21 +59,106 @@ internal static class RtfTableConverter
 
         var parser = new HtmlParser();
         var document = parser.ParseDocument(html);
-        var tables = document.QuerySelectorAll("table")
+        var topLevelTables = document.QuerySelectorAll("table")
             .Where(IsTopLevelTable)
-            .Select(BuildTableData)
-            .Where(table => table.RowCount > 0 && table.NonEmptyCellCount > 0)
-            .OrderByDescending(table => table.MeaningfulRowCount)
-            .ThenByDescending(table => table.NonEmptyCellCount)
-            .ThenByDescending(table => table.ColumnCount)
+            .Select(ParseTopLevelTable)
             .ToList();
 
-        if (tables.Count == 0)
+        if (topLevelTables.Count == 0)
         {
             throw new NoTablesFoundException("No top-level tables were found in the input RTF file.");
         }
 
-        return tables[0];
+        var sectionRows = new List<IReadOnlyList<string>>();
+        AppendSectionRows(sectionRows, topLevelTables, TableSectionTitle.Income);
+        AppendSectionRows(sectionRows, topLevelTables, TableSectionTitle.Expense);
+
+        if (sectionRows.Count > 0)
+        {
+            return sectionRows.ToArray();
+        }
+
+        return topLevelTables
+            .Where(table => table.LiveRows.Count > 0)
+            .Take(2)
+            .SelectMany(table => table.LiveRows)
+            .ToArray();
+    }
+
+    private static ParsedTopLevelTable ParseTopLevelTable(IElement tableElement)
+    {
+        var tableData = BuildTableData(tableElement);
+        var liveRows = ExtractLiveRows(tableData);
+        var normalizedText = NormalizeCellText(tableElement.TextContent);
+
+        return new ParsedTopLevelTable(
+            DetectSectionTitle(normalizedText),
+            normalizedText,
+            liveRows);
+    }
+
+    private static void AppendSectionRows(
+        ICollection<IReadOnlyList<string>> targetRows,
+        IReadOnlyList<ParsedTopLevelTable> tables,
+        TableSectionTitle sectionTitle)
+    {
+        var titleIndex = -1;
+        for (var index = 0; index < tables.Count; index++)
+        {
+            if (tables[index].Title == sectionTitle)
+            {
+                titleIndex = index;
+                break;
+            }
+        }
+
+        if (titleIndex < 0)
+        {
+            return;
+        }
+
+        for (var index = titleIndex + 1; index < tables.Count; index++)
+        {
+            var table = tables[index];
+            if (table.Title != TableSectionTitle.None)
+            {
+                break;
+            }
+
+            if (table.LiveRows.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var row in table.LiveRows)
+            {
+                targetRows.Add(row);
+            }
+
+            return;
+        }
+    }
+
+    private static TableSectionTitle DetectSectionTitle(string normalizedText)
+    {
+        if (normalizedText.Contains("Источники финансирования дефицита бюджета", StringComparison.OrdinalIgnoreCase))
+        {
+            return TableSectionTitle.Sources;
+        }
+
+        if (normalizedText.Contains("1.Доходы", StringComparison.OrdinalIgnoreCase) ||
+            normalizedText.Contains("1. Доходы", StringComparison.OrdinalIgnoreCase))
+        {
+            return TableSectionTitle.Income;
+        }
+
+        if (normalizedText.Contains("2.Расходы", StringComparison.OrdinalIgnoreCase) ||
+            normalizedText.Contains("2. Расходы", StringComparison.OrdinalIgnoreCase))
+        {
+            return TableSectionTitle.Expense;
+        }
+
+        return TableSectionTitle.None;
     }
 
     private static bool IsTopLevelTable(IElement table)
@@ -134,7 +218,7 @@ internal static class RtfTableConverter
 
         var selectedRows = table.Rows
             .Skip(startIndex)
-            .Where(row => row.Any(cell => !string.IsNullOrWhiteSpace(cell)))
+            .Where(LooksLikeExportRow)
             .ToList();
 
         if (selectedRows.Count == 0)
@@ -171,6 +255,25 @@ internal static class RtfTableConverter
 
         return LooksLikeBudgetCode(nonEmptyCells[0]) &&
                nonEmptyCells.Skip(1).Any(LooksLikeValueCell);
+    }
+
+    private static bool LooksLikeExportRow(IReadOnlyList<string> row)
+        => LooksLikeDataRow(row) || LooksLikeSubtotalRow(row);
+
+    private static bool LooksLikeSubtotalRow(IReadOnlyList<string> row)
+    {
+        var nonEmptyCells = row.Where(cell => !string.IsNullOrWhiteSpace(cell)).ToArray();
+        if (nonEmptyCells.Length < 2)
+        {
+            return false;
+        }
+
+        if (!nonEmptyCells[0].StartsWith("Итого по коду БК", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return nonEmptyCells.Skip(1).Any(LooksLikeValueCell);
     }
 
     private static bool LooksLikeBudgetCode(string value)
@@ -354,6 +457,19 @@ internal sealed record TableData(IReadOnlyList<IReadOnlyList<string>> Rows)
     public int NonEmptyCellCount => Rows.Sum(row => row.Count(cell => !string.IsNullOrWhiteSpace(cell)));
 
     public int MeaningfulRowCount => Rows.Count(row => row.Any(cell => !string.IsNullOrWhiteSpace(cell)));
+}
+
+internal sealed record ParsedTopLevelTable(
+    TableSectionTitle Title,
+    string NormalizedText,
+    IReadOnlyList<IReadOnlyList<string>> LiveRows);
+
+internal enum TableSectionTitle
+{
+    None,
+    Income,
+    Expense,
+    Sources,
 }
 
 internal sealed class NoTablesFoundException(string message) : Exception(message);

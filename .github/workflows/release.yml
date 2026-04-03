@@ -37,6 +37,7 @@ jobs:
 
       - name: Publish
         run: |
+          rm -rf "./artifacts/publish/${{ matrix.rid }}"
           dotnet publish ./RtfTableExporter.csproj \
             -c Release \
             -r "${{ matrix.rid }}" \
@@ -54,15 +55,21 @@ jobs:
         run: |
           package_dir="./artifacts/package/${{ matrix.rid }}"
           zip_path="./artifacts/package/RtfTableExporter-${{ steps.version.outputs.tag }}-${{ matrix.rid }}.zip"
+          publish_dir="./artifacts/publish/${{ matrix.rid }}"
 
           rm -rf "$package_dir"
-          mkdir -p "$package_dir/docs"
-          cp -R "./artifacts/publish/${{ matrix.rid }}/." "$package_dir/"
-          cp "./README.md" "$package_dir/"
-          cp "./icon.png" "$package_dir/"
-          cp "./icon.ico" "$package_dir/"
-          cp "./docs/USAGE.md" "$package_dir/docs/"
-          cp "./docs/RELEASE_OVERVIEW.md" "$package_dir/docs/"
+          mkdir -p "$package_dir"
+
+          if [ -f "$publish_dir/RtfTableExporter.exe" ]; then
+            cp "$publish_dir/RtfTableExporter.exe" "$package_dir/"
+          elif [ -f "$publish_dir/RtfTableExporter" ]; then
+            cp "$publish_dir/RtfTableExporter" "$package_dir/"
+          else
+            echo "Published binary was not found in $publish_dir" >&2
+            exit 1
+          fi
+
+          cp "./RELEASE_README.md" "$package_dir/README.md"
 
           if [ -f "$package_dir/RtfTableExporter" ]; then
             chmod +x "$package_dir/RtfTableExporter"

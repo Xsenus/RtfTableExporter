@@ -70,7 +70,7 @@ internal sealed class CliOptions
 
                 case "--all-tables":
                 case "--table-index":
-                    throw new CliException("This build exports only the largest table. --all-tables and --table-index are not supported.");
+                    throw new CliException("This build exports the income and expense sections only. --all-tables and --table-index are not supported.");
 
                 default:
                     if (arg.StartsWith("-", StringComparison.Ordinal))

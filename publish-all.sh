@@ -2,14 +2,17 @@
 set -euo pipefail
 
 configuration="${1:-Release}"
-version="${2:-1.0.1-local}"
+version="${2:-1.0.2-local}"
 github_repository="${3:-}"
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_path="$project_dir/RtfTableExporter.csproj"
 output_root="$project_dir/artifacts/publish"
+release_readme_path="$project_dir/RELEASE_README.md"
 rids=("win-x64" "linux-x64" "linux-musl-x64" "linux-arm64")
 
 for rid in "${rids[@]}"; do
+  rm -rf "$output_root/$rid"
+
   dotnet publish "$project_path" \
     -c "$configuration" \
     -r "$rid" \
@@ -21,4 +24,6 @@ for rid in "${rids[@]}"; do
     -p:Version="$version" \
     -p:GitHubRepository="$github_repository" \
     -o "$output_root/$rid"
+
+  cp "$release_readme_path" "$output_root/$rid/README.md"
 done

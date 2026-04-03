@@ -69,8 +69,9 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("Behavior:");
         Console.WriteLine("  - If no input is passed, all .rtf files next to the executable are processed.");
-        Console.WriteLine("  - Only the largest top-level table is exported.");
-        Console.WriteLine("  - Column headers are skipped, only data rows are written.");
+        Console.WriteLine("  - The income and expense sections are exported.");
+        Console.WriteLine("  - Column headers and final section totals are skipped.");
+        Console.WriteLine("  - Data rows and 'Итого по коду БК' rows are written.");
         Console.WriteLine("  - Existing .txt files are overwritten when possible.");
         Console.WriteLine("  - If one file fails, the rest continue.");
         Console.WriteLine();
