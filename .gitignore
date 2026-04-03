@@ -1,0 +1,6 @@
+bin/
+obj/
+artifacts/
+out/
+.rtftableexporter-update.log
+.rtftableexporter-update-state.json
