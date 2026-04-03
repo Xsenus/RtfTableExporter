@@ -2,5 +2,10 @@ bin/
 obj/
 artifacts/
 out/
+.vs/
+.cr/
+*.user
+*.rsuser
+*.suo
 .rtftableexporter-update.log
 .rtftableexporter-update-state.json
