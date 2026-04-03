@@ -8,7 +8,7 @@ namespace RtfTableExporter;
 
 internal static class GitHubReleaseUpdater
 {
-    private static readonly TimeSpan CheckInterval = TimeSpan.FromHours(12);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static async Task TryAutoUpdateAsync(
@@ -23,16 +23,11 @@ internal static class GitHubReleaseUpdater
         }
 
         var statePath = Path.Combine(context.BaseDirectory, ".rtftableexporter-update-state.json");
-        var state = TryLoadState(statePath);
-        if (!ShouldCheck(state, context))
-        {
-            return;
-        }
 
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            timeout.CancelAfter(RequestTimeout);
 
             var latestRelease = await GetLatestReleaseAsync(context.GitHubRepository!, timeout.Token);
             PersistState(statePath, context, latestRelease?.TagName);
@@ -63,41 +58,6 @@ internal static class GitHubReleaseUpdater
         {
             AppendUpdateLog(context.BaseDirectory, $"[{DateTimeOffset.UtcNow:O}] {ex}");
             await SafeWriteLineAsync(log, $"UPDATE|{ex.Message}");
-        }
-    }
-
-    private static bool ShouldCheck(UpdateState? state, AppRuntimeContext context)
-    {
-        if (state is null)
-        {
-            return true;
-        }
-
-        if (!string.Equals(state.Repository, context.GitHubRepository, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(state.RuntimeIdentifier, context.RuntimeIdentifier, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(state.CurrentVersion, context.CurrentVersion, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        return DateTimeOffset.UtcNow - state.LastCheckedUtc >= CheckInterval;
-    }
-
-    private static UpdateState? TryLoadState(string statePath)
-    {
-        try
-        {
-            if (!File.Exists(statePath))
-            {
-                return null;
-            }
-
-            var json = File.ReadAllText(statePath);
-            return JsonSerializer.Deserialize<UpdateState>(json, JsonOptions);
-        }
-        catch
-        {
-            return null;
         }
     }
 
