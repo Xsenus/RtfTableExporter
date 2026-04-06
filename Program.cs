@@ -12,14 +12,33 @@ internal static class Program
 
         try
         {
-            var options = CliOptions.Parse(args);
+            var launchContext = LaunchContextResolver.Resolve(args);
+            Environment.CurrentDirectory = launchContext.WorkingDirectory;
+
+            var options = CliOptions.Parse(launchContext.EffectiveArgs);
+            var context = AppRuntimeContext.Create(options.GitHubRepositoryOverride);
+            LaunchContextResolver.AcknowledgeResume(launchContext);
+
             if (options.ShowHelp)
             {
                 WriteUsage();
                 return 0;
             }
 
-            var context = AppRuntimeContext.Create(options.GitHubRepositoryOverride);
+            var updateResult = await GitHubReleaseUpdater.TryAutoUpdateAsync(
+                options,
+                context,
+                launchContext.EffectiveArgs,
+                launchContext.WorkingDirectory,
+                Console.Out,
+                Console.Error,
+                CancellationToken.None);
+
+            if (updateResult.Handled)
+            {
+                return updateResult.ExitCode;
+            }
+
             var result = BatchProcessor.Run(options, context);
 
             foreach (var success in result.Successes)
@@ -42,8 +61,6 @@ internal static class Program
             }
 
             Console.Out.WriteLine($"SUMMARY|{result.Successes.Count}|{result.Failures.Count}");
-
-            await GitHubReleaseUpdater.TryAutoUpdateAsync(options, context, Console.Error, CancellationToken.None);
             return result.ExitCode;
         }
         catch (CliException ex)
@@ -68,6 +85,9 @@ internal static class Program
         Console.WriteLine("  RtfTableExporter");
         Console.WriteLine();
         Console.WriteLine("Behavior:");
+        Console.WriteLine("  - The update check runs before file processing.");
+        Console.WriteLine("  - If an update is installed, the app restarts and continues with the same arguments.");
+        Console.WriteLine("  - If the updated version does not confirm takeover, the current version continues processing.");
         Console.WriteLine("  - If no input is passed, all .rtf files next to the executable are processed.");
         Console.WriteLine("  - The income and expense sections are exported.");
         Console.WriteLine("  - Column headers and final section totals are skipped.");

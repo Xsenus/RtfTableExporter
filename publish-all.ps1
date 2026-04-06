@@ -1,8 +1,8 @@
 param(
     [string]$Configuration = "Release",
-    [string]$Version = "1.0.6-local",
+    [string]$Version = "1.0.7-local",
     [string]$GitHubRepository = "",
-    [string[]]$RuntimeIdentifiers = @("win-x64", "linux-x64", "linux-musl-x64", "linux-arm64")
+    [string[]]$RuntimeIdentifiers = @("win-x64", "win-x86", "linux-x64", "linux-musl-x64", "linux-arm64")
 )
 
 $ErrorActionPreference = "Stop"

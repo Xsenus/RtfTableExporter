@@ -16,6 +16,7 @@ jobs:
       matrix:
         rid:
           - win-x64
+          - win-x86
           - linux-x64
           - linux-musl-x64
           - linux-arm64

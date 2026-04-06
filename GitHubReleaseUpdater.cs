@@ -9,61 +9,76 @@ namespace RtfTableExporter;
 internal static class GitHubReleaseUpdater
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan TakeoverTimeout = TimeSpan.FromSeconds(10);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public static async Task TryAutoUpdateAsync(
+    public static async Task<AutoUpdateExecutionResult> TryAutoUpdateAsync(
         CliOptions options,
         AppRuntimeContext context,
+        IReadOnlyList<string> restartArguments,
+        string workingDirectory,
+        TextWriter output,
         TextWriter log,
         CancellationToken cancellationToken)
     {
         if (options.DisableAutoUpdate || !context.CanSelfUpdate || string.IsNullOrWhiteSpace(context.GitHubRepository))
         {
-            return;
+            return AutoUpdateExecutionResult.NotHandled;
         }
 
         if (!CanWriteToDirectory(context.BaseDirectory))
         {
             await SafeWriteLineAsync(log, $"UPDATE|Application directory is not writable: {context.BaseDirectory}");
-            return;
+            return AutoUpdateExecutionResult.NotHandled;
         }
 
         var statePath = Path.Combine(context.BaseDirectory, ".rtftableexporter-update-state.json");
 
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(RequestTimeout);
+            GitHubRelease? latestRelease;
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeout.CancelAfter(RequestTimeout);
+                latestRelease = await GetLatestReleaseAsync(context.GitHubRepository!, timeout.Token);
+            }
 
-            var latestRelease = await GetLatestReleaseAsync(context.GitHubRepository!, timeout.Token);
             PersistState(statePath, context, latestRelease?.TagName);
 
             if (latestRelease is null || !IsNewerVersion(latestRelease.TagName, context.CurrentVersion))
             {
-                return;
+                return AutoUpdateExecutionResult.NotHandled;
             }
 
             var asset = SelectAsset(latestRelease, context);
             if (asset is null)
             {
                 await SafeWriteLineAsync(log, $"UPDATE|No compatible release asset was found for {DescribeRuntime(context)}.");
-                return;
+                return AutoUpdateExecutionResult.NotHandled;
             }
 
-            var scheduled = await DownloadAndScheduleAsync(asset, context, timeout.Token);
-            if (scheduled)
-            {
-                await SafeWriteLineAsync(log, $"UPDATE|Scheduled update to {latestRelease.TagName}. It will be applied after the process exits.");
-            }
+            await SafeWriteLineAsync(log, $"UPDATE|Applying update {latestRelease.TagName} before processing.");
+            var updateResult = await DownloadScheduleAndRunUpdatedAsync(
+                asset,
+                context,
+                restartArguments,
+                workingDirectory,
+                output,
+                log,
+                cancellationToken);
+
+            return updateResult;
         }
         catch (OperationCanceledException)
         {
             // Silent timeout to avoid slowing normal use.
+            return AutoUpdateExecutionResult.NotHandled;
         }
         catch (Exception ex)
         {
             AppendUpdateLog(context.BaseDirectory, $"[{DateTimeOffset.UtcNow:O}] {ex}");
             await SafeWriteLineAsync(log, $"UPDATE|{ex.Message}");
+            return AutoUpdateExecutionResult.NotHandled;
         }
     }
 
@@ -161,64 +176,92 @@ internal static class GitHubReleaseUpdater
         return null;
     }
 
-    private static async Task<bool> DownloadAndScheduleAsync(
+    private static async Task<AutoUpdateExecutionResult> DownloadScheduleAndRunUpdatedAsync(
         GitHubAsset asset,
         AppRuntimeContext context,
+        IReadOnlyList<string> restartArguments,
+        string workingDirectory,
+        TextWriter output,
+        TextWriter log,
         CancellationToken cancellationToken)
     {
         var processPath = context.ProcessPath;
         if (string.IsNullOrWhiteSpace(processPath))
         {
-            return false;
+            return AutoUpdateExecutionResult.NotHandled;
         }
 
         var tempRoot = Path.Combine(Path.GetTempPath(), $"{context.ReleasePackageId}-update-{Guid.NewGuid():N}");
         var archivePath = Path.Combine(tempRoot, asset.Name);
         var extractPath = Path.Combine(tempRoot, "package");
-        Directory.CreateDirectory(extractPath);
+        var resumeStatePath = Path.Combine(tempRoot, "resume-state.json");
+        var acknowledgementPath = Path.Combine(tempRoot, "takeover.ok");
+        var keepTempRoot = false;
 
-        using (var client = new HttpClient())
+        try
         {
-            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("RtfTableExporter", "1.0"));
-            await using var source = await client.GetStreamAsync(asset.BrowserDownloadUrl, cancellationToken);
-            await using var destination = File.Create(archivePath);
-            await source.CopyToAsync(destination, cancellationToken);
-        }
+            Directory.CreateDirectory(extractPath);
 
-        ZipFile.ExtractToDirectory(archivePath, extractPath, overwriteFiles: true);
-
-        var targetBinaryName = Path.GetFileName(processPath);
-        if (string.IsNullOrWhiteSpace(targetBinaryName))
-        {
-            return false;
-        }
-
-        var sourceBinaryName = ResolveSourceBinaryName(extractPath, targetBinaryName, context.ApplicationName);
-        if (string.IsNullOrWhiteSpace(sourceBinaryName))
-        {
-            throw new InvalidOperationException(
-                $"Release asset {asset.Name} does not contain {targetBinaryName} or {GetCanonicalBinaryName(context.ApplicationName)}.");
-        }
-
-        var logPath = Path.Combine(context.BaseDirectory, ".rtftableexporter-update.log");
-        if (OperatingSystem.IsWindows())
-        {
-            var scriptPath = Path.Combine(tempRoot, "apply-update.ps1");
-            await File.WriteAllTextAsync(
-                scriptPath,
-                BuildWindowsScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, sourceBinaryName, targetBinaryName, logPath),
+            await PersistResumeStateAsync(
+                resumeStatePath,
+                workingDirectory,
+                restartArguments,
+                acknowledgementPath,
                 cancellationToken);
-            StartDetachedProcess("powershell", $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"");
-            return true;
-        }
 
-        var shellScriptPath = Path.Combine(tempRoot, "apply-update.sh");
-        await File.WriteAllTextAsync(
-            shellScriptPath,
-            BuildLinuxScript(extractPath, context.BaseDirectory, Process.GetCurrentProcess().Id, sourceBinaryName, targetBinaryName, logPath),
-            cancellationToken);
-        StartDetachedProcess("/bin/sh", $"\"{shellScriptPath}\"");
-        return true;
+            using (var client = new HttpClient())
+            {
+                client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("RtfTableExporter", "1.0"));
+                await using var source = await client.GetStreamAsync(asset.BrowserDownloadUrl, cancellationToken);
+                await using var destination = File.Create(archivePath);
+                await source.CopyToAsync(destination, cancellationToken);
+            }
+
+            ZipFile.ExtractToDirectory(archivePath, extractPath, overwriteFiles: true);
+
+            var targetBinaryName = Path.GetFileName(processPath);
+            if (string.IsNullOrWhiteSpace(targetBinaryName))
+            {
+                return AutoUpdateExecutionResult.NotHandled;
+            }
+
+            var sourceBinaryName = ResolveSourceBinaryName(extractPath, targetBinaryName, context.ApplicationName);
+            if (string.IsNullOrWhiteSpace(sourceBinaryName))
+            {
+                throw new InvalidOperationException(
+                    $"Release asset {asset.Name} does not contain {targetBinaryName} or {GetCanonicalBinaryName(context.ApplicationName)}.");
+            }
+
+            var updatedBinaryPath = Path.Combine(extractPath, sourceBinaryName);
+            EnsureBinaryIsExecutable(updatedBinaryPath);
+
+            var updateResult = await RunUpdatedBinaryAsync(
+                updatedBinaryPath,
+                resumeStatePath,
+                acknowledgementPath,
+                workingDirectory,
+                output,
+                log,
+                token => SchedulePermanentInstallAsync(
+                    extractPath,
+                    context.BaseDirectory,
+                    Process.GetCurrentProcess().Id,
+                    sourceBinaryName,
+                    targetBinaryName,
+                    log,
+                    token),
+                cancellationToken);
+
+            keepTempRoot = updateResult.Handled;
+            return updateResult;
+        }
+        finally
+        {
+            if (!keepTempRoot)
+            {
+                TryDeleteDirectory(tempRoot);
+            }
+        }
     }
 
     private static string BuildWindowsScript(
@@ -280,23 +323,32 @@ SOURCE_BINARY_NAME='{{EscapeShell(sourceBinaryName)}}'
 TARGET_BINARY_NAME='{{EscapeShell(targetBinaryName)}}'
 SOURCE_BINARY="$SOURCE/$SOURCE_BINARY_NAME"
 TARGET_BINARY="$TARGET/$TARGET_BINARY_NAME"
+EXIT_CODE=0
 
 while kill -0 "$PID_TO_WAIT" 2>/dev/null; do
   sleep 1
 done
 
-mkdir -p "$TARGET" 2>>"$LOG_FILE"
-if [ ! -f "$SOURCE_BINARY" ]; then
+mkdir -p "$TARGET" 2>>"$LOG_FILE" || EXIT_CODE=$?
+if [ "$EXIT_CODE" -eq 0 ] && [ ! -f "$SOURCE_BINARY" ]; then
   printf '%s\n' "Release binary was not found: $SOURCE_BINARY" >>"$LOG_FILE"
-  exit 1
+  EXIT_CODE=1
 fi
 
-cp -f "$SOURCE_BINARY" "$TARGET_BINARY" 2>>"$LOG_FILE"
-chmod +x "$TARGET_BINARY" 2>>"$LOG_FILE"
-if [ -f "$SOURCE/README.md" ]; then
-  cp -f "$SOURCE/README.md" "$TARGET/README.md" 2>>"$LOG_FILE"
+if [ "$EXIT_CODE" -eq 0 ]; then
+  cp -f "$SOURCE_BINARY" "$TARGET_BINARY" 2>>"$LOG_FILE" || EXIT_CODE=$?
 fi
+
+if [ "$EXIT_CODE" -eq 0 ]; then
+  chmod +x "$TARGET_BINARY" 2>>"$LOG_FILE" || EXIT_CODE=$?
+fi
+
+if [ "$EXIT_CODE" -eq 0 ] && [ -f "$SOURCE/README.md" ]; then
+  cp -f "$SOURCE/README.md" "$TARGET/README.md" 2>>"$LOG_FILE" || EXIT_CODE=$?
+fi
+
 rm -rf "$(dirname "$SOURCE")" >/dev/null 2>&1
+exit "$EXIT_CODE"
 """;
 
     private static void StartDetachedProcess(string fileName, string arguments)
@@ -318,6 +370,200 @@ rm -rf "$(dirname "$SOURCE")" >/dev/null 2>&1
 
     private static string EscapeShell(string value)
         => value.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+
+    private static async Task PersistResumeStateAsync(
+        string resumeStatePath,
+        string workingDirectory,
+        IReadOnlyList<string> restartArguments,
+        string acknowledgementPath,
+        CancellationToken cancellationToken)
+    {
+        var state = new ResumeLaunchState(
+            string.IsNullOrWhiteSpace(workingDirectory) ? Environment.CurrentDirectory : workingDirectory,
+            restartArguments.ToArray(),
+            DisableAutoUpdateOnce: true,
+            AcknowledgementPath: acknowledgementPath);
+
+        var json = JsonSerializer.Serialize(state, JsonOptions);
+        await File.WriteAllTextAsync(resumeStatePath, json, cancellationToken);
+    }
+
+    private static async Task<AutoUpdateExecutionResult> RunUpdatedBinaryAsync(
+        string updatedBinaryPath,
+        string resumeStatePath,
+        string acknowledgementPath,
+        string workingDirectory,
+        TextWriter output,
+        TextWriter log,
+        Func<CancellationToken, Task> schedulePermanentInstallAsync,
+        CancellationToken cancellationToken)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = updatedBinaryPath,
+            WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory) ? Environment.CurrentDirectory : workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        startInfo.ArgumentList.Add("--resume-state");
+        startInfo.ArgumentList.Add(resumeStatePath);
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException($"Failed to start updated binary: {updatedBinaryPath}");
+
+        var outputTask = PumpReaderAsync(process.StandardOutput, output, cancellationToken);
+        var errorTask = PumpReaderAsync(process.StandardError, log, cancellationToken);
+
+        var takeoverConfirmed = await WaitForTakeoverAsync(process, acknowledgementPath, cancellationToken);
+        if (!takeoverConfirmed)
+        {
+            TryStopProcess(process);
+            await process.WaitForExitAsync(CancellationToken.None);
+            await Task.WhenAll(outputTask, errorTask);
+            await SafeWriteLineAsync(log, "UPDATE|Updated version did not confirm takeover. Continuing with the current version.");
+            return AutoUpdateExecutionResult.NotHandled;
+        }
+
+        await schedulePermanentInstallAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        await Task.WhenAll(outputTask, errorTask);
+        return new AutoUpdateExecutionResult(Handled: true, ExitCode: process.ExitCode);
+    }
+
+    private static async Task PumpReaderAsync(StreamReader reader, TextWriter writer, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null)
+            {
+                break;
+            }
+
+            await SafeWriteLineAsync(writer, line);
+        }
+    }
+
+    private static async Task<bool> WaitForTakeoverAsync(Process process, string acknowledgementPath, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + TakeoverTimeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (File.Exists(acknowledgementPath))
+            {
+                return true;
+            }
+
+            if (process.HasExited)
+            {
+                return false;
+            }
+
+            await Task.Delay(100, cancellationToken);
+        }
+
+        return File.Exists(acknowledgementPath);
+    }
+
+    private static void EnsureBinaryIsExecutable(string binaryPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        File.SetUnixFileMode(
+            binaryPath,
+            UnixFileMode.UserRead |
+            UnixFileMode.UserWrite |
+            UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead |
+            UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead |
+            UnixFileMode.OtherExecute);
+    }
+
+    private static void TryStopProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Ignore cleanup failures.
+        }
+    }
+
+    private static void TryDeleteDirectory(string directoryPath)
+    {
+        try
+        {
+            if (Directory.Exists(directoryPath))
+            {
+                Directory.Delete(directoryPath, recursive: true);
+            }
+        }
+        catch
+        {
+            // Ignore cleanup failures.
+        }
+    }
+
+    private static async Task SchedulePermanentInstallAsync(
+        string sourceDirectory,
+        string targetDirectory,
+        int processId,
+        string sourceBinaryName,
+        string targetBinaryName,
+        TextWriter log,
+        CancellationToken cancellationToken)
+    {
+        var logPath = Path.Combine(targetDirectory, ".rtftableexporter-update.log");
+
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var scriptPath = Path.Combine(Path.GetDirectoryName(sourceDirectory)!, "apply-update.ps1");
+                await File.WriteAllTextAsync(
+                    scriptPath,
+                    BuildWindowsScript(
+                        sourceDirectory,
+                        targetDirectory,
+                        processId,
+                        sourceBinaryName,
+                        targetBinaryName,
+                        logPath),
+                    cancellationToken);
+                StartDetachedProcess("powershell", $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"");
+                return;
+            }
+
+            var shellScriptPath = Path.Combine(Path.GetDirectoryName(sourceDirectory)!, "apply-update.sh");
+            await File.WriteAllTextAsync(
+                shellScriptPath,
+                BuildLinuxScript(
+                    sourceDirectory,
+                    targetDirectory,
+                    processId,
+                    sourceBinaryName,
+                    targetBinaryName,
+                    logPath),
+                cancellationToken);
+            StartDetachedProcess("/bin/sh", $"\"{shellScriptPath}\"");
+        }
+        catch (Exception ex)
+        {
+            AppendUpdateLog(targetDirectory, $"[{DateTimeOffset.UtcNow:O}] Failed to schedule permanent update install: {ex}");
+            await SafeWriteLineAsync(log, "UPDATE|Failed to schedule permanent installation of the new version.");
+        }
+    }
 
     private static IEnumerable<string> GetRuntimeIdentifierCandidates(AppRuntimeContext context)
     {
@@ -411,6 +657,11 @@ internal sealed record UpdateState(
     string RuntimeIdentifier,
     string CurrentVersion,
     string? LastSeenTag);
+
+internal readonly record struct AutoUpdateExecutionResult(bool Handled, int ExitCode)
+{
+    public static AutoUpdateExecutionResult NotHandled => new(false, 0);
+}
 
 internal sealed class GitHubRelease
 {
