@@ -2,7 +2,7 @@
 set -euo pipefail
 
 configuration="${1:-Release}"
-version="${2:-1.0.8-local}"
+version="${2:-1.0.9-local}"
 github_repository="${3:-}"
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_path="$project_dir/RtfTableExporter.csproj"

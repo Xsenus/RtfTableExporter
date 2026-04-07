@@ -68,6 +68,74 @@ RtfTableExporter --input file.rtf --tab
 
 Для пакетного режима это удобнее, чем один-единственный путь в выводе, потому что на одном запуске может быть обработано сразу несколько файлов.
 
+### Как запускать без окна
+
+Сам `RtfTableExporter` не прячет консольное окно изнутри. Для запуска из другой программы правильнее скрывать окно на стороне вызывающего процесса.
+
+Windows, .NET:
+
+```csharp
+using System.Diagnostics;
+
+var process = new Process
+{
+    StartInfo = new ProcessStartInfo
+    {
+        FileName = @"C:\tools\RtfTableExporter.exe",
+        Arguments = @"""C:\data\report.rtf"" ""C:\out\report.txt""",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    }
+};
+
+process.Start();
+var stdout = process.StandardOutput.ReadToEnd();
+var stderr = process.StandardError.ReadToEnd();
+process.WaitForExit();
+```
+
+Windows, Visual FoxPro:
+
+```foxpro
+LOCAL loShell, lcExe, lcInput, lcOutput, lcCommand, lnExitCode
+
+loShell = CREATEOBJECT("WScript.Shell")
+lcExe = "C:\tools\RtfTableExporter.exe"
+lcInput = "C:\data\report.rtf"
+lcOutput = "C:\out\report.txt"
+lcCommand = ["] + lcExe + [" "] + lcInput + [" "] + lcOutput + ["]
+
+* 0 = скрытое окно, .T. = ждать завершения
+lnExitCode = loShell.Run(lcCommand, 0, .T.)
+```
+
+Windows, PowerShell:
+
+```powershell
+$p = Start-Process `
+  -FilePath "C:\tools\RtfTableExporter.exe" `
+  -ArgumentList '"C:\data\report.rtf" "C:\out\report.txt"' `
+  -WindowStyle Hidden `
+  -RedirectStandardOutput "C:\temp\rtf-out.log" `
+  -RedirectStandardError "C:\temp\rtf-err.log" `
+  -PassThru `
+  -Wait
+
+$p.ExitCode
+```
+
+Linux:
+
+На Linux отдельного "консольного окна" обычно нет. Если не нужно занимать терминал, запускайте процесс в фоне, из сервиса или с перенаправлением вывода:
+
+```bash
+nohup ./RtfTableExporter "/home/user/data/report.rtf" "/home/user/out/report.txt" >rtf-out.log 2>rtf-err.log &
+```
+
+Если программа запускается из GUI-приложения, сервиса или другого процесса без терминала, отдельное окно и так не появится.
+
 ## Автообновление
 
 Автообновление работает так:

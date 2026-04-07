@@ -1,6 +1,6 @@
 param(
     [string]$Configuration = "Release",
-    [string]$Version = "1.0.8-local",
+    [string]$Version = "1.0.9-local",
     [string]$GitHubRepository = "",
     [string[]]$RuntimeIdentifiers = @("win-x64", "win-x86", "linux-x64", "linux-musl-x64", "linux-arm64")
 )

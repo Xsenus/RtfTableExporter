@@ -123,6 +123,44 @@ chmod +x ./RtfTableExporter
 ./RtfTableExporter "/home/user/data/report.rtf" --tab
 ```
 
+## Запуск без окна
+
+`RtfTableExporter` не скрывает консоль сам по себе. Если его запускает другая программа, окно нужно скрывать на стороне этой программы.
+
+Visual FoxPro:
+
+```foxpro
+LOCAL loShell, lcCommand, lnExitCode
+
+loShell = CREATEOBJECT("WScript.Shell")
+lcCommand = ["] + FULLPATH("RtfTableExporter.exe") + [" "] + ;
+    "C:\data\report.rtf" + [" "] + ;
+    "C:\out\report.txt" + ["]
+
+* 0 = скрытое окно, .T. = ждать завершения
+lnExitCode = loShell.Run(lcCommand, 0, .T.)
+```
+
+.NET:
+
+```csharp
+var psi = new ProcessStartInfo
+{
+    FileName = @"C:\tools\RtfTableExporter.exe",
+    Arguments = @"""C:\data\report.rtf"" ""C:\out\report.txt""",
+    UseShellExecute = false,
+    CreateNoWindow = true,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true
+};
+```
+
+Linux:
+
+```bash
+nohup ./RtfTableExporter "/home/user/data/report.rtf" "/home/user/out/report.txt" >rtf-out.log 2>rtf-err.log &
+```
+
 ## Вывод в консоль
 
 `stdout`:
