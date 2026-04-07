@@ -10,6 +10,8 @@ internal sealed class CliOptions
 
     public required string Delimiter { get; init; }
 
+    public required TextFileEncodingKind OutputEncoding { get; init; }
+
     public bool DisableAutoUpdate { get; init; }
 
     public string? GitHubRepositoryOverride { get; init; }
@@ -19,6 +21,7 @@ internal sealed class CliOptions
         var inputs = new List<string>();
         string? outputPath = null;
         var delimiter = "|";
+        var outputEncoding = TextFileEncodingKind.Cp1251;
         var disableAutoUpdate = false;
         string? gitHubRepositoryOverride = null;
 
@@ -34,6 +37,7 @@ internal sealed class CliOptions
                         ShowHelp = true,
                         Inputs = Array.Empty<string>(),
                         Delimiter = delimiter,
+                        OutputEncoding = outputEncoding,
                     };
 
                 case "-i":
@@ -55,6 +59,15 @@ internal sealed class CliOptions
 
                 case "--tab":
                     delimiter = "\t";
+                    break;
+
+                case "--encoding":
+                case "--output-encoding":
+                    outputEncoding = ParseOutputEncoding(ReadValue(args, ref i, arg));
+                    break;
+
+                case "--foxpro":
+                    outputEncoding = TextFileEncodingKind.Cp1251;
                     break;
 
                 case "--github-repo":
@@ -88,6 +101,7 @@ internal sealed class CliOptions
             Inputs = inputs,
             OutputPath = outputPath,
             Delimiter = delimiter,
+            OutputEncoding = outputEncoding,
             DisableAutoUpdate = disableAutoUpdate,
             GitHubRepositoryOverride = gitHubRepositoryOverride,
         };
@@ -144,6 +158,29 @@ internal sealed class CliOptions
         }
 
         return builder.ToString();
+    }
+
+    private static TextFileEncodingKind ParseOutputEncoding(string rawValue)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            throw new CliException("Encoding cannot be empty.");
+        }
+
+        return rawValue.Trim().ToLowerInvariant() switch
+        {
+            "cp1251" => TextFileEncodingKind.Cp1251,
+            "1251" => TextFileEncodingKind.Cp1251,
+            "windows-1251" => TextFileEncodingKind.Cp1251,
+            "ansi" => TextFileEncodingKind.Cp1251,
+            "foxpro" => TextFileEncodingKind.Cp1251,
+            "utf8" => TextFileEncodingKind.Utf8,
+            "utf-8" => TextFileEncodingKind.Utf8,
+            "utf8bom" => TextFileEncodingKind.Utf8Bom,
+            "utf-8-bom" => TextFileEncodingKind.Utf8Bom,
+            "utf8-bom" => TextFileEncodingKind.Utf8Bom,
+            _ => throw new CliException($"Unsupported encoding: {rawValue}. Supported values: cp1251, utf8, utf8-bom."),
+        };
     }
 }
 

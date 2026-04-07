@@ -42,6 +42,31 @@ RtfTableExporter file.rtf --tab
 RtfTableExporter file.rtf --delimiter "||"
 ```
 
+## Кодировка вывода
+
+По умолчанию:
+
+```text
+cp1251
+```
+
+Поддерживаются:
+
+- `cp1251`
+- `utf8`
+- `utf8-bom`
+
+Примеры:
+
+```bash
+RtfTableExporter file.rtf --foxpro
+RtfTableExporter file.rtf --encoding cp1251
+RtfTableExporter file.rtf --encoding utf8
+RtfTableExporter file.rtf --encoding utf8-bom
+```
+
+Если результат читает Visual FoxPro, рекомендуемый режим: `cp1251`. Он уже используется по умолчанию, а `--foxpro` оставлен как явный алиас.
+
 ## Примеры вызова
 
 Обработать все `.rtf` рядом с программой:
@@ -97,8 +122,9 @@ RtfTableExporter a.rtf --no-update-check
 3. У каждой секции отбрасывается шапка таблицы.
 4. Оставляются строки данных и строки `Итого по коду БК`.
 5. Общая строка `Всего` не экспортируется.
-6. Строки сохраняются как UTF-8 с BOM.
-7. Переносы строк всегда записываются как CRLF, одинаково на Windows и Linux.
+6. Строки по умолчанию сохраняются как `cp1251`.
+7. При необходимости кодировку можно переключить на `utf8` или `utf8-bom`.
+8. Переносы строк всегда записываются как CRLF, одинаково на Windows и Linux.
 
 ## Поведение при ошибках
 
@@ -144,7 +170,7 @@ loShell = CREATEOBJECT("WScript.Shell")
 lcExe = "C:\tools\RtfTableExporter.exe"
 lcInput = "C:\data\report.rtf"
 lcOutput = "C:\out\report.txt"
-lcCommand = ["] + lcExe + [" "] + lcInput + [" "] + lcOutput + ["]
+lcCommand = ["] + lcExe + [" --foxpro "] + lcInput + [" "] + lcOutput + ["]
 
 * 0 = скрытое окно, .T. = ждать завершения
 lnExitCode = loShell.Run(lcCommand, 0, .T.)

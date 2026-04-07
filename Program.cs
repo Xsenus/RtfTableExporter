@@ -80,8 +80,8 @@ internal static class Program
     {
         Console.WriteLine("RtfTableExporter");
         Console.WriteLine("Usage:");
-        Console.WriteLine("  RtfTableExporter [input1.rtf input2.rtf ...] [--output <dir|file>] [--delimiter \"|\"]");
-        Console.WriteLine("  RtfTableExporter --input file1.rtf --input file2.rtf --output out");
+        Console.WriteLine("  RtfTableExporter [input1.rtf input2.rtf ...] [--output <dir|file>] [--delimiter \"|\"] [--encoding cp1251]");
+        Console.WriteLine("  RtfTableExporter --input file1.rtf --input file2.rtf --output out --encoding utf8-bom");
         Console.WriteLine("  RtfTableExporter");
         Console.WriteLine();
         Console.WriteLine("Behavior:");
@@ -100,6 +100,8 @@ internal static class Program
         Console.WriteLine("  -i, --input <path>         Add a file, directory, or wildcard mask.");
         Console.WriteLine("  -o, --output <path>        Output directory. For a single file, .txt path is also allowed.");
         Console.WriteLine("  -d, --delimiter <value>    Output separator. Default is | . Use \\t or tab for TAB.");
+        Console.WriteLine("      --encoding <value>     Output encoding: cp1251, utf8, utf8-bom. Default is cp1251.");
+        Console.WriteLine("      --foxpro               Shortcut for --encoding cp1251.");
         Console.WriteLine("      --tab                  Shortcut for TAB separator.");
         Console.WriteLine("      --github-repo <repo>   GitHub repo in owner/name format for self-update.");
         Console.WriteLine("      --no-update-check      Disable GitHub release update check for this run.");

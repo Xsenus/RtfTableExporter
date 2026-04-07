@@ -9,9 +9,8 @@ namespace RtfTableExporter;
 internal static class RtfTableConverter
 {
     private const string OutputNewLine = "\r\n";
-    private static readonly UTF8Encoding Utf8WithBom = new(true);
 
-    public static ConversionResult Convert(string inputPath, string outputPath, string delimiter)
+    public static ConversionResult Convert(string inputPath, string outputPath, string delimiter, TextFileEncodingKind outputEncoding)
     {
         var normalizedInputPath = Path.GetFullPath(inputPath);
         var normalizedOutputPath = Path.GetFullPath(outputPath);
@@ -39,7 +38,7 @@ internal static class RtfTableConverter
         }
 
         Directory.CreateDirectory(directory);
-        WriteRows(normalizedOutputPath, liveRows, delimiter);
+        WriteRows(normalizedOutputPath, liveRows, delimiter, outputEncoding);
 
         return new ConversionResult(
             normalizedInputPath,
@@ -317,7 +316,11 @@ internal static class RtfTableConverter
         return -1;
     }
 
-    private static void WriteRows(string outputPath, IReadOnlyList<IReadOnlyList<string>> rows, string delimiter)
+    private static void WriteRows(
+        string outputPath,
+        IReadOnlyList<IReadOnlyList<string>> rows,
+        string delimiter,
+        TextFileEncodingKind outputEncoding)
     {
         var tempPath = Path.Combine(
             Path.GetDirectoryName(outputPath)!,
@@ -325,7 +328,7 @@ internal static class RtfTableConverter
 
         try
         {
-            using (var writer = new StreamWriter(tempPath, false, Utf8WithBom))
+            using (var writer = new StreamWriter(tempPath, false, outputEncoding.GetEncoding()))
             {
                 writer.NewLine = OutputNewLine;
 

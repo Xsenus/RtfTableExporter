@@ -27,7 +27,7 @@ internal static class BatchProcessor
 
             try
             {
-                var result = RtfTableConverter.Convert(inputFile, outputPath, options.Delimiter);
+                var result = RtfTableConverter.Convert(inputFile, outputPath, options.Delimiter, options.OutputEncoding);
                 successes.Add(new FileSuccess(result.InputPath, result.OutputPath, result.RowCount, result.ColumnCount));
             }
             catch (Exception ex)

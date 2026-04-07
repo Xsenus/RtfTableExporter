@@ -7,7 +7,8 @@
 - читает секции `1.Доходы` и `2. Расходы`
 - пишет строки с данными и строки `Итого по коду БК`
 - не пишет шапку таблиц и общую строку `Всего`
-- сохраняет `txt` как UTF-8 с BOM и с переносами строк CRLF
+- по умолчанию сохраняет `txt` как `cp1251` и с переносами строк CRLF
+- позволяет выбрать `--encoding cp1251`, `--encoding utf8` или `--encoding utf8-bom`
 - если вход не задан, обрабатывает все `*.rtf` рядом с программой
 - если выход не задан, сохраняет `*.txt` рядом с программой
 - проверяет новые релизы GitHub на каждом запуске
@@ -121,6 +122,8 @@ chmod +x ./RtfTableExporter
 ```bash
 ./RtfTableExporter "/home/user/data/report.rtf" --delimiter ";"
 ./RtfTableExporter "/home/user/data/report.rtf" --tab
+./RtfTableExporter "/home/user/data/report.rtf" --foxpro
+./RtfTableExporter "/home/user/data/report.rtf" --encoding utf8-bom
 ```
 
 ## Запуск без окна
@@ -133,7 +136,7 @@ Visual FoxPro:
 LOCAL loShell, lcCommand, lnExitCode
 
 loShell = CREATEOBJECT("WScript.Shell")
-lcCommand = ["] + FULLPATH("RtfTableExporter.exe") + [" "] + ;
+lcCommand = ["] + FULLPATH("RtfTableExporter.exe") + [" --foxpro "] + ;
     "C:\data\report.rtf" + [" "] + ;
     "C:\out\report.txt" + ["]
 
@@ -147,7 +150,7 @@ lnExitCode = loShell.Run(lcCommand, 0, .T.)
 var psi = new ProcessStartInfo
 {
     FileName = @"C:\tools\RtfTableExporter.exe",
-    Arguments = @"""C:\data\report.rtf"" ""C:\out\report.txt""",
+    Arguments = @"--foxpro ""C:\data\report.rtf"" ""C:\out\report.txt""",
     UseShellExecute = false,
     CreateNoWindow = true,
     RedirectStandardOutput = true,

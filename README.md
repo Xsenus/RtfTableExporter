@@ -16,7 +16,9 @@
 - Готовые `txt` перезаписываются. Если конкретный файл перезаписать нельзя, ошибка уходит в `stderr`, а остальные файлы продолжают обрабатываться.
 - Разделитель по умолчанию: `|`.
 - Разделитель можно заменить на любой свой, включая TAB.
-- Итоговые `txt` всегда записываются как UTF-8 с BOM и с переносами строк CRLF, одинаково на Windows и Linux.
+- Итоговые `txt` по умолчанию записываются как `cp1251` и с переносами строк CRLF.
+- Кодировку можно переключить вручную через `--encoding`: `cp1251`, `utf8`, `utf8-bom`.
+- Для FoxPro можно использовать алиас `--foxpro`.
 - Есть безопасная проверка обновлений из GitHub Releases. Ошибки обновления не валят основную обработку.
 - Если до обработки найден новый релиз, программа обновляется и повторно запускается с теми же аргументами.
 
@@ -33,6 +35,9 @@ RtfTableExporter --input file.rtf --output C:\result\file.txt
 RtfTableExporter --input file.rtf --delimiter ";"
 RtfTableExporter --input file.rtf --delimiter "\t"
 RtfTableExporter --input file.rtf --tab
+RtfTableExporter --input file.rtf --foxpro
+RtfTableExporter --input file.rtf --encoding utf8
+RtfTableExporter --input file.rtf --encoding utf8-bom
 ```
 
 ## Логика вывода
@@ -67,6 +72,12 @@ RtfTableExporter --input file.rtf --tab
 4. Проверять `ExitCode`.
 
 Для пакетного режима это удобнее, чем один-единственный путь в выводе, потому что на одном запуске может быть обработано сразу несколько файлов.
+
+Если результат потом читает Visual FoxPro, можно ничего не добавлять: по умолчанию используется `cp1251`. Для явного режима можно запускать так:
+
+```bash
+RtfTableExporter --input file.rtf --foxpro
+```
 
 ### Как запускать без окна
 
@@ -105,7 +116,7 @@ loShell = CREATEOBJECT("WScript.Shell")
 lcExe = "C:\tools\RtfTableExporter.exe"
 lcInput = "C:\data\report.rtf"
 lcOutput = "C:\out\report.txt"
-lcCommand = ["] + lcExe + [" "] + lcInput + [" "] + lcOutput + ["]
+lcCommand = ["] + lcExe + [" --foxpro "] + lcInput + [" "] + lcOutput + ["]
 
 * 0 = скрытое окно, .T. = ждать завершения
 lnExitCode = loShell.Run(lcCommand, 0, .T.)
