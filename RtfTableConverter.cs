@@ -8,7 +8,8 @@ namespace RtfTableExporter;
 
 internal static class RtfTableConverter
 {
-    private static readonly UTF8Encoding Utf8NoBom = new(false);
+    private const string OutputNewLine = "\r\n";
+    private static readonly UTF8Encoding Utf8WithBom = new(true);
 
     public static ConversionResult Convert(string inputPath, string outputPath, string delimiter)
     {
@@ -324,8 +325,10 @@ internal static class RtfTableConverter
 
         try
         {
-            using (var writer = new StreamWriter(tempPath, false, Utf8NoBom))
+            using (var writer = new StreamWriter(tempPath, false, Utf8WithBom))
             {
+                writer.NewLine = OutputNewLine;
+
                 foreach (var row in rows)
                 {
                     var lastColumn = FindLastNonEmptyColumn(row);
