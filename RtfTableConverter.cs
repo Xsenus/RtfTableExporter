@@ -1,5 +1,7 @@
 using System.Globalization;
+using System.IO.Compression;
 using System.Text;
+using System.Xml.Linq;
 using AngleSharp.Dom;
 using AngleSharp.Html.Parser;
 using RtfPipe;
@@ -9,6 +11,11 @@ namespace RtfTableExporter;
 internal static class RtfTableConverter
 {
     private const string OutputNewLine = "\r\n";
+    private static readonly string[] SupportedInputExtensions = [".rtf", ".docx"];
+
+    public static bool IsSupportedInputExtension(string path)
+        => SupportedInputExtensions.Any(extension =>
+            string.Equals(Path.GetExtension(path), extension, StringComparison.OrdinalIgnoreCase));
 
     public static ConversionResult Convert(string inputPath, string outputPath, string delimiter, TextFileEncodingKind outputEncoding)
     {
@@ -20,15 +27,15 @@ internal static class RtfTableConverter
             throw new FileNotFoundException("Input file was not found.", normalizedInputPath);
         }
 
-        if (!string.Equals(Path.GetExtension(normalizedInputPath), ".rtf", StringComparison.OrdinalIgnoreCase))
+        if (!IsSupportedInputExtension(normalizedInputPath))
         {
-            throw new InvalidOperationException("Only .rtf files are supported.");
+            throw new InvalidOperationException("Only .rtf and .docx files are supported.");
         }
 
         var liveRows = ExtractRowsForExport(normalizedInputPath);
         if (liveRows.Count == 0)
         {
-            throw new NoTablesFoundException("The input RTF file does not contain exportable data rows.");
+            throw new NoTablesFoundException("The input file does not contain exportable data rows.");
         }
 
         var directory = Path.GetDirectoryName(normalizedOutputPath);
@@ -48,6 +55,29 @@ internal static class RtfTableConverter
     }
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExport(string inputPath)
+        => string.Equals(Path.GetExtension(inputPath), ".docx", StringComparison.OrdinalIgnoreCase)
+            ? ExtractRowsForExportFromDocx(inputPath)
+            : ExtractRowsForExportFromRtf(inputPath);
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromRtf(string inputPath)
+    {
+        try
+        {
+            return ExtractRowsForExportFromHtml(inputPath);
+        }
+        catch (KeyNotFoundException ex) when (IsRtfPipeTableLayoutFailure(ex))
+        {
+            return ExtractRowsForExportFromRawRtf(inputPath);
+        }
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromDocx(string inputPath)
+        => ExtractRowsForExportFromParsedTables(ParseDocxTables(inputPath));
+
+    private static bool IsRtfPipeTableLayoutFailure(KeyNotFoundException exception)
+        => exception.Message.Contains("RtfPipe.UnitValue", StringComparison.Ordinal);
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromHtml(string inputPath)
     {
         using var inputStream = File.OpenRead(inputPath);
         var html = Rtf.ToHtml(inputStream, new RtfHtmlSettings
@@ -64,9 +94,23 @@ internal static class RtfTableConverter
             .Select(ParseTopLevelTable)
             .ToList();
 
+        return ExtractRowsForExportFromParsedTables(topLevelTables);
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromParsedTables(IReadOnlyList<ParsedTopLevelTable> topLevelTables)
+    {
         if (topLevelTables.Count == 0)
         {
-            throw new NoTablesFoundException("No top-level tables were found in the input RTF file.");
+            throw new NoTablesFoundException("No top-level tables were found in the input file.");
+        }
+
+        if (topLevelTables.Any(table => table.NormalizedText.Contains("0503152", StringComparison.OrdinalIgnoreCase)))
+        {
+            var form0503152Rows = ExtractForm0503152Rows(topLevelTables.SelectMany(table => table.Rows));
+            if (form0503152Rows.Count > 0)
+            {
+                return form0503152Rows;
+            }
         }
 
         var sectionRows = new List<IReadOnlyList<string>>();
@@ -78,11 +122,431 @@ internal static class RtfTableConverter
             return sectionRows.ToArray();
         }
 
-        return topLevelTables
-            .Where(table => table.LiveRows.Count > 0)
-            .Take(2)
-            .SelectMany(table => table.LiveRows)
+        return ExtractGenericTableRows(topLevelTables.Select(table => table.Rows));
+    }
+
+    private static IReadOnlyList<ParsedTopLevelTable> ParseDocxTables(string inputPath)
+    {
+        using var archive = ZipFile.OpenRead(inputPath);
+        var documentEntry = GetDocxEntry(archive, "word/document.xml")
+            ?? throw new InvalidOperationException("DOCX main document part word/document.xml was not found.");
+
+        using var documentStream = documentEntry.Open();
+        var document = XDocument.Load(documentStream);
+        XNamespace word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+        return document
+            .Descendants(word + "tbl")
+            .Where(table => !table.Ancestors(word + "tbl").Any())
+            .Select(table => ParseDocxTable(table, word))
             .ToArray();
+    }
+
+    private static ZipArchiveEntry? GetDocxEntry(ZipArchive archive, string normalizedFullName)
+        => archive.Entries.FirstOrDefault(entry =>
+            string.Equals(
+                entry.FullName.Replace('\\', '/'),
+                normalizedFullName,
+                StringComparison.OrdinalIgnoreCase));
+
+    private static ParsedTopLevelTable ParseDocxTable(XElement tableElement, XNamespace word)
+    {
+        var grid = tableElement
+            .Elements(word + "tr")
+            .Select(row => ParseDocxRow(row, word).Select<string, string?>(cell => cell).ToList())
+            .ToList();
+
+        var tableData = new TableData(NormalizeGrid(grid));
+        var normalizedText = NormalizeCellText(string.Join(' ', tableData.Rows.SelectMany(row => row)));
+        var liveRows = ExtractLiveRows(tableData);
+
+        return new ParsedTopLevelTable(
+            DetectSectionTitle(normalizedText),
+            normalizedText,
+            liveRows,
+            tableData.Rows);
+    }
+
+    private static IReadOnlyList<string> ParseDocxRow(XElement rowElement, XNamespace word)
+    {
+        var row = new List<string>();
+        foreach (var cellElement in rowElement.Elements(word + "tc"))
+        {
+            row.Add(ParseDocxCell(cellElement, word));
+
+            var gridSpan = ParseDocxGridSpan(cellElement, word);
+            for (var index = 1; index < gridSpan; index++)
+            {
+                row.Add(string.Empty);
+            }
+        }
+
+        return row;
+    }
+
+    private static string ParseDocxCell(XElement cellElement, XNamespace word)
+    {
+        var paragraphs = cellElement
+            .Elements(word + "p")
+            .Select(paragraph => ParseDocxParagraph(paragraph, word))
+            .Where(text => !string.IsNullOrWhiteSpace(text));
+
+        return NormalizeCellText(string.Join(' ', paragraphs));
+    }
+
+    private static string ParseDocxParagraph(XElement paragraphElement, XNamespace word)
+    {
+        var builder = new StringBuilder();
+        foreach (var element in paragraphElement.Descendants())
+        {
+            if (element.Name == word + "t")
+            {
+                builder.Append(element.Value);
+            }
+            else if (element.Name == word + "tab" || element.Name == word + "br" || element.Name == word + "cr")
+            {
+                builder.Append(' ');
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static int ParseDocxGridSpan(XElement cellElement, XNamespace word)
+    {
+        var rawValue = cellElement
+            .Element(word + "tcPr")?
+            .Element(word + "gridSpan")?
+            .Attribute(word + "val")?
+            .Value;
+
+        return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0
+            ? parsed
+            : 1;
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromRawRtf(string inputPath)
+    {
+        var rawRows = ParseRawRtfTableRows(inputPath);
+        if (rawRows.Count == 0)
+        {
+            return [];
+        }
+
+        if (LooksLikeForm0503152(rawRows))
+        {
+            return ExtractForm0503152Rows(rawRows);
+        }
+
+        return rawRows
+            .Select(TrimTrailingEmptyCells)
+            .Where(HasMeaningfulCells)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> ParseRawRtfTableRows(string inputPath)
+    {
+        var ansiEncoding = GetRtfAnsiEncoding();
+        var rtf = File.ReadAllText(inputPath, ansiEncoding);
+        var rows = new List<IReadOnlyList<string>>();
+        var currentRow = new List<string>();
+        var currentCell = new StringBuilder();
+        var inRow = false;
+        var unicodeFallbackLength = 1;
+
+        for (var index = 0; index < rtf.Length; index++)
+        {
+            var current = rtf[index];
+            if (current is '{' or '}')
+            {
+                continue;
+            }
+
+            if (current != '\\')
+            {
+                AppendRawRtfText(currentCell, inRow, current);
+                continue;
+            }
+
+            if (++index >= rtf.Length)
+            {
+                break;
+            }
+
+            var next = rtf[index];
+            if (next is '\\' or '{' or '}')
+            {
+                AppendRawRtfText(currentCell, inRow, next);
+                continue;
+            }
+
+            if (next == '~')
+            {
+                AppendRawRtfText(currentCell, inRow, ' ');
+                continue;
+            }
+
+            if (next == '\'')
+            {
+                if (index + 2 < rtf.Length &&
+                    TryDecodeRtfHexByte(rtf[index + 1], rtf[index + 2], ansiEncoding, out var decoded))
+                {
+                    AppendRawRtfText(currentCell, inRow, decoded);
+                    index += 2;
+                }
+
+                continue;
+            }
+
+            if (!char.IsLetter(next))
+            {
+                continue;
+            }
+
+            var wordStart = index;
+            while (index < rtf.Length && char.IsLetter(rtf[index]))
+            {
+                index++;
+            }
+
+            var word = rtf[wordStart..index];
+            var hasArgument = false;
+            var negativeArgument = false;
+            var argument = 0;
+
+            if (index < rtf.Length && rtf[index] is '-' or '+')
+            {
+                negativeArgument = rtf[index] == '-';
+                index++;
+            }
+
+            while (index < rtf.Length && char.IsDigit(rtf[index]))
+            {
+                hasArgument = true;
+                argument = checked((argument * 10) + (rtf[index] - '0'));
+                index++;
+            }
+
+            if (negativeArgument)
+            {
+                argument = -argument;
+            }
+
+            var hasDelimiterSpace = index < rtf.Length && rtf[index] == ' ';
+            switch (word)
+            {
+                case "trowd":
+                    if (inRow && (currentCell.Length > 0 || currentRow.Count > 0))
+                    {
+                        AddRawRtfRow(rows, currentRow, currentCell);
+                    }
+
+                    currentRow.Clear();
+                    currentCell.Clear();
+                    inRow = true;
+                    break;
+
+                case "cell":
+                    if (inRow)
+                    {
+                        AddRawRtfCell(currentRow, currentCell);
+                    }
+
+                    break;
+
+                case "row":
+                    if (inRow)
+                    {
+                        AddRawRtfRow(rows, currentRow, currentCell);
+                        inRow = false;
+                    }
+
+                    break;
+
+                case "par":
+                case "line":
+                case "tab":
+                    AppendRawRtfText(currentCell, inRow, ' ');
+                    break;
+
+                case "uc" when hasArgument && argument >= 0:
+                    unicodeFallbackLength = argument;
+                    break;
+
+                case "u" when hasArgument:
+                    AppendRawRtfUnicode(currentCell, inRow, argument);
+                    SkipRtfUnicodeFallback(rtf, ref index, unicodeFallbackLength);
+                    continue;
+            }
+
+            if (!hasDelimiterSpace && index < rtf.Length)
+            {
+                index--;
+            }
+        }
+
+        if (inRow && (currentCell.Length > 0 || currentRow.Count > 0))
+        {
+            AddRawRtfRow(rows, currentRow, currentCell);
+        }
+
+        return rows;
+    }
+
+    private static Encoding GetRtfAnsiEncoding()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        return Encoding.GetEncoding(1251);
+    }
+
+    private static void AppendRawRtfText(StringBuilder target, bool inRow, char value)
+    {
+        if (inRow)
+        {
+            target.Append(value);
+        }
+    }
+
+    private static void AppendRawRtfUnicode(StringBuilder target, bool inRow, int value)
+    {
+        if (!inRow)
+        {
+            return;
+        }
+
+        if (value < 0)
+        {
+            value += 65536;
+        }
+
+        target.Append(char.ConvertFromUtf32(value));
+    }
+
+    private static void AddRawRtfCell(ICollection<string> row, StringBuilder currentCell)
+    {
+        row.Add(NormalizeCellText(currentCell.ToString()));
+        currentCell.Clear();
+    }
+
+    private static void AddRawRtfRow(ICollection<IReadOnlyList<string>> rows, List<string> currentRow, StringBuilder currentCell)
+    {
+        if (currentCell.Length > 0)
+        {
+            AddRawRtfCell(currentRow, currentCell);
+        }
+
+        if (currentRow.Any(cell => !string.IsNullOrWhiteSpace(cell)))
+        {
+            rows.Add(currentRow.ToArray());
+        }
+
+        currentRow.Clear();
+        currentCell.Clear();
+    }
+
+    private static bool TryDecodeRtfHexByte(char high, char low, Encoding encoding, out char decoded)
+    {
+        decoded = default;
+        var highNibble = HexToNumber(high);
+        var lowNibble = HexToNumber(low);
+        if (highNibble < 0 || lowNibble < 0)
+        {
+            return false;
+        }
+
+        var bytes = new[] { (byte)((highNibble << 4) + lowNibble) };
+        var text = encoding.GetString(bytes);
+        if (text.Length != 1)
+        {
+            return false;
+        }
+
+        decoded = text[0];
+        return true;
+    }
+
+    private static int HexToNumber(char value)
+        => value switch
+        {
+            >= '0' and <= '9' => value - '0',
+            >= 'a' and <= 'f' => value - 'a' + 10,
+            >= 'A' and <= 'F' => value - 'A' + 10,
+            _ => -1,
+        };
+
+    private static void SkipRtfUnicodeFallback(string rtf, ref int index, int fallbackLength)
+    {
+        for (var skipped = 0; skipped < fallbackLength && index < rtf.Length; skipped++)
+        {
+            if (rtf[index] == '\\' &&
+                index + 3 < rtf.Length &&
+                rtf[index + 1] == '\'' &&
+                HexToNumber(rtf[index + 2]) >= 0 &&
+                HexToNumber(rtf[index + 3]) >= 0)
+            {
+                index += 3;
+                continue;
+            }
+
+            if (rtf[index] is '{' or '}')
+            {
+                break;
+            }
+        }
+    }
+
+    private static bool LooksLikeForm0503152(IReadOnlyList<IReadOnlyList<string>> rows)
+        => rows.Any(row => row.Any(cell => cell.Contains("0503152", StringComparison.OrdinalIgnoreCase)));
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractForm0503152Rows(IEnumerable<IReadOnlyList<string>> rows)
+        => rows
+            .Select(CompactRow)
+            .Where(LooksLikeForm0503152DataRow)
+            .ToArray();
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractGenericTableRows(IEnumerable<IReadOnlyList<IReadOnlyList<string>>> tables)
+        => tables
+            .Select(NormalizeGenericTableRows)
+            .Where(rows => rows.Count > 0)
+            .SelectMany(rows => rows)
+            .ToArray();
+
+    private static IReadOnlyList<IReadOnlyList<string>> NormalizeGenericTableRows(IReadOnlyList<IReadOnlyList<string>> rows)
+        => rows
+            .Select(TrimTrailingEmptyCells)
+            .Where(HasMeaningfulCells)
+            .ToArray();
+
+    private static bool HasMeaningfulCells(IReadOnlyList<string> row)
+        => row.Any(cell => !string.IsNullOrWhiteSpace(cell));
+
+    private static bool LooksLikeForm0503152DataRow(IReadOnlyList<string> compactRow)
+    {
+        if (compactRow.Count < 3)
+        {
+            return false;
+        }
+
+        return (LooksLikeForm0503152LineCode(compactRow[1]) || LooksLikeBudgetCode(compactRow[1])) &&
+               compactRow.Skip(2).Any(LooksLikeNumericValueCell);
+    }
+
+    private static bool LooksLikeNumericValueCell(string value)
+        => value.Any(char.IsDigit) && LooksLikeValueCell(value);
+
+    private static bool LooksLikeForm0503152LineCode(string value)
+    {
+        var trimmed = value.Trim();
+        return trimmed.Length == 3 && trimmed.All(char.IsDigit);
+    }
+
+    private static IReadOnlyList<string> CompactRow(IReadOnlyList<string> row)
+        => row.Where(cell => !string.IsNullOrWhiteSpace(cell)).ToArray();
+
+    private static IReadOnlyList<string> TrimTrailingEmptyCells(IReadOnlyList<string> row)
+    {
+        var lastColumn = FindLastNonEmptyColumn(row);
+        return lastColumn < 0 ? [] : row.Take(lastColumn + 1).ToArray();
     }
 
     private static ParsedTopLevelTable ParseTopLevelTable(IElement tableElement)
@@ -94,7 +558,8 @@ internal static class RtfTableConverter
         return new ParsedTopLevelTable(
             DetectSectionTitle(normalizedText),
             normalizedText,
-            liveRows);
+            liveRows,
+            tableData.Rows);
     }
 
     private static void AppendSectionRows(
@@ -468,7 +933,8 @@ internal sealed record TableData(IReadOnlyList<IReadOnlyList<string>> Rows)
 internal sealed record ParsedTopLevelTable(
     TableSectionTitle Title,
     string NormalizedText,
-    IReadOnlyList<IReadOnlyList<string>> LiveRows);
+    IReadOnlyList<IReadOnlyList<string>> LiveRows,
+    IReadOnlyList<IReadOnlyList<string>> Rows);
 
 internal enum TableSectionTitle
 {

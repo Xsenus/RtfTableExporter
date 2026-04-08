@@ -49,7 +49,7 @@ internal static class BatchProcessor
 
         if (options.Inputs.Count == 0)
         {
-            foreach (var file in Directory.EnumerateFiles(context.BaseDirectory, "*.rtf", SearchOption.TopDirectoryOnly))
+            foreach (var file in EnumerateSupportedInputFiles(context.BaseDirectory))
             {
                 if (seen.Add(file))
                 {
@@ -90,7 +90,7 @@ internal static class BatchProcessor
         var fullPath = Path.GetFullPath(trimmed);
         if (Directory.Exists(fullPath))
         {
-            foreach (var file in Directory.EnumerateFiles(fullPath, "*.rtf", SearchOption.TopDirectoryOnly))
+            foreach (var file in EnumerateSupportedInputFiles(fullPath))
             {
                 if (seen.Add(file))
                 {
@@ -107,9 +107,9 @@ internal static class BatchProcessor
             return;
         }
 
-        if (!string.Equals(Path.GetExtension(fullPath), ".rtf", StringComparison.OrdinalIgnoreCase))
+        if (!RtfTableConverter.IsSupportedInputExtension(fullPath))
         {
-            failures.Add(new FileFailure(input, null, "Only .rtf files are supported."));
+            failures.Add(new FileFailure(input, null, "Only .rtf and .docx files are supported."));
             return;
         }
 
@@ -137,12 +137,12 @@ internal static class BatchProcessor
 
         var matches = Directory
             .EnumerateFiles(directory, fileNameMask, SearchOption.TopDirectoryOnly)
-            .Where(path => string.Equals(Path.GetExtension(path), ".rtf", StringComparison.OrdinalIgnoreCase))
+            .Where(RtfTableConverter.IsSupportedInputExtension)
             .ToList();
 
         if (matches.Count == 0)
         {
-            failures.Add(new FileFailure(input, null, "Wildcard did not match any .rtf files."));
+            failures.Add(new FileFailure(input, null, "Wildcard did not match any supported .rtf or .docx files."));
             return;
         }
 
@@ -157,6 +157,11 @@ internal static class BatchProcessor
 
     private static bool HasWildcard(string value)
         => value.IndexOfAny(['*', '?']) >= 0;
+
+    private static IEnumerable<string> EnumerateSupportedInputFiles(string directory)
+        => Directory
+            .EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
+            .Where(RtfTableConverter.IsSupportedInputExtension);
 
     private static OutputTarget ResolveOutputTarget(string? rawOutputPath, int inputCount, string executableDirectory)
     {
