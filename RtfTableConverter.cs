@@ -238,10 +238,7 @@ internal static class RtfTableConverter
             return ExtractForm0503152Rows(rawRows);
         }
 
-        return rawRows
-            .Select(TrimTrailingEmptyCells)
-            .Where(HasMeaningfulCells)
-            .ToArray();
+        return NormalizeExportRows(rawRows);
     }
 
     private static IReadOnlyList<IReadOnlyList<string>> ParseRawRtfTableRows(string inputPath)
@@ -499,10 +496,7 @@ internal static class RtfTableConverter
         => rows.Any(row => row.Any(cell => cell.Contains("0503152", StringComparison.OrdinalIgnoreCase)));
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractForm0503152Rows(IEnumerable<IReadOnlyList<string>> rows)
-        => rows
-            .Select(CompactRow)
-            .Where(LooksLikeForm0503152DataRow)
-            .ToArray();
+        => NormalizeExportRows(rows.Where(row => LooksLikeForm0503152DataRow(CompactRow(row))));
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractGenericTableRows(IEnumerable<IReadOnlyList<IReadOnlyList<string>>> tables)
         => tables
@@ -512,10 +506,40 @@ internal static class RtfTableConverter
             .ToArray();
 
     private static IReadOnlyList<IReadOnlyList<string>> NormalizeGenericTableRows(IReadOnlyList<IReadOnlyList<string>> rows)
-        => rows
-            .Select(TrimTrailingEmptyCells)
+        => NormalizeExportRows(rows);
+
+    private static IReadOnlyList<IReadOnlyList<string>> NormalizeExportRows(IEnumerable<IReadOnlyList<string>> rows)
+    {
+        var meaningfulRows = rows
             .Where(HasMeaningfulCells)
+            .ToList();
+
+        if (meaningfulRows.Count == 0)
+        {
+            return [];
+        }
+
+        var firstUsedColumn = meaningfulRows
+            .Select(FindFirstNonEmptyColumn)
+            .Where(index => index >= 0)
+            .DefaultIfEmpty(0)
+            .Min();
+
+        var lastUsedColumn = meaningfulRows
+            .Select(FindLastNonEmptyColumn)
+            .Where(index => index >= 0)
+            .DefaultIfEmpty(-1)
+            .Max();
+
+        if (lastUsedColumn < firstUsedColumn)
+        {
+            return [];
+        }
+
+        return meaningfulRows
+            .Select(row => SliceRow(row, firstUsedColumn, lastUsedColumn))
             .ToArray();
+    }
 
     private static bool HasMeaningfulCells(IReadOnlyList<string> row)
         => row.Any(cell => !string.IsNullOrWhiteSpace(cell));
@@ -543,10 +567,22 @@ internal static class RtfTableConverter
     private static IReadOnlyList<string> CompactRow(IReadOnlyList<string> row)
         => row.Where(cell => !string.IsNullOrWhiteSpace(cell)).ToArray();
 
-    private static IReadOnlyList<string> TrimTrailingEmptyCells(IReadOnlyList<string> row)
+    private static IReadOnlyList<string> SliceRow(IReadOnlyList<string> row, int firstColumn, int lastColumn)
     {
-        var lastColumn = FindLastNonEmptyColumn(row);
-        return lastColumn < 0 ? [] : row.Take(lastColumn + 1).ToArray();
+        if (lastColumn < firstColumn)
+        {
+            return [];
+        }
+
+        var length = lastColumn - firstColumn + 1;
+        var normalized = new string[length];
+        for (var index = 0; index < length; index++)
+        {
+            var sourceIndex = firstColumn + index;
+            normalized[index] = sourceIndex < row.Count ? row[sourceIndex] : string.Empty;
+        }
+
+        return normalized;
     }
 
     private static ParsedTopLevelTable ParseTopLevelTable(IElement tableElement)
@@ -691,10 +727,7 @@ internal static class RtfTableConverter
             return [];
         }
 
-        var lastUsedColumn = selectedRows.Max(FindLastNonEmptyColumn);
-        return selectedRows
-            .Select(row => row.Take(lastUsedColumn + 1).ToArray())
-            .ToArray();
+        return NormalizeExportRows(selectedRows);
     }
 
     private static int FindFirstDataRowIndex(IReadOnlyList<IReadOnlyList<string>> rows)
@@ -768,6 +801,19 @@ internal static class RtfTableConverter
             ch is ',' or '.' or '-' or '+' or '(' or ')' or '/');
     }
 
+    private static int FindFirstNonEmptyColumn(IReadOnlyList<string> row)
+    {
+        for (var index = 0; index < row.Count; index++)
+        {
+            if (!string.IsNullOrWhiteSpace(row[index]))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
     private static int FindLastNonEmptyColumn(IReadOnlyList<string> row)
     {
         for (var index = row.Count - 1; index >= 0; index--)
@@ -799,13 +845,12 @@ internal static class RtfTableConverter
 
                 foreach (var row in rows)
                 {
-                    var lastColumn = FindLastNonEmptyColumn(row);
-                    if (lastColumn < 0)
+                    if (row.Count == 0)
                     {
                         continue;
                     }
 
-                    for (var columnIndex = 0; columnIndex <= lastColumn; columnIndex++)
+                    for (var columnIndex = 0; columnIndex < row.Count; columnIndex++)
                     {
                         if (columnIndex > 0)
                         {
