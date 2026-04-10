@@ -4,19 +4,16 @@
 
 Что делает:
 
-- автоматически определяет поддерживаемую форму отчета: `0531857` или `0503152`
-- для формы `0531857` читает секции `1.Доходы` и `2. Расходы`
+- автоматически определяет формы `0531857` и `0503152`
+- для формы `0531857` читает секции доходов и расходов
 - для формы `0503152` читает единую таблицу отчета
-- для неизвестных форм выгружает все содержательные таблицы как обычный текст
-- пишет строки с данными, для формы `0531857` также сохраняет строки `Итого по коду БК`
-- старый бинарный `.doc` напрямую не читает; сохраняйте его как `.docx` или `.rtf`
-- не пишет шапку таблиц и общую строку `Всего`
-- по умолчанию сохраняет `txt` как `cp1251` и с переносами строк CRLF
-- позволяет выбрать `--encoding cp1251`, `--encoding utf8` или `--encoding utf8-bom`
+- для неизвестных форм выгружает все содержательные таблицы
+- по умолчанию пишет `txt` в `cp1251` с переносами строк `CRLF`
+- умеет `--encoding cp1251`, `--encoding utf8`, `--encoding utf8-bom`
 - если вход не задан, обрабатывает все `*.rtf` и `*.docx` рядом с программой
 - если выход не задан, сохраняет `*.txt` рядом с программой
-- проверяет новые релизы GitHub на каждом запуске
-- если найдено обновление, сначала обновляется, а затем запускается снова с теми же аргументами
+- по умолчанию пишет файловый лог `RtfTableExporter.log` рядом с программой
+- умеет самообновляться из GitHub Releases
 
 ## Windows
 
@@ -29,50 +26,19 @@
 Один файл:
 
 ```powershell
-.\RtfTableExporter.exe "C:\data\report.rtf"
+.\RtfTableExporter.exe --input "C:\data\report.rtf" --output "C:\out\report.txt"
 ```
 
-Несколько файлов:
-
-```powershell
-.\RtfTableExporter.exe "C:\data\a.rtf" "C:\data\b.docx"
-```
-
-Папка с входными файлами:
-
-```powershell
-.\RtfTableExporter.exe --input "C:\data\"
-```
-
-Маска:
-
-```powershell
-.\RtfTableExporter.exe --input "C:\data\*.rtf"
-```
-
-Маска DOCX:
-
-```powershell
-.\RtfTableExporter.exe --input "C:\data\*.docx"
-```
-
-Папка для результата:
+Папка:
 
 ```powershell
 .\RtfTableExporter.exe --input "C:\data\" --output "C:\out\"
 ```
 
-Один конкретный выходной файл:
+FoxPro-режим:
 
 ```powershell
-.\RtfTableExporter.exe "C:\data\report.rtf" --output "C:\out\report.txt"
-```
-
-Свой разделитель:
-
-```powershell
-.\RtfTableExporter.exe "C:\data\report.rtf" --delimiter ";"
-.\RtfTableExporter.exe "C:\data\report.rtf" --tab
+.\RtfTableExporter.exe --foxpro --input "C:\data\report.rtf" --output "C:\out\report.txt"
 ```
 
 ## Linux
@@ -83,101 +49,110 @@
 chmod +x ./RtfTableExporter
 ```
 
-Для автообновления текущий пользователь должен иметь право записи в папку, где лежит `RtfTableExporter`.
-
-Все `RTF` и `DOCX` рядом с программой:
-
-```bash
-./RtfTableExporter
-```
-
 Один файл:
 
 ```bash
-./RtfTableExporter "/home/user/data/report.rtf"
+./RtfTableExporter --input "/home/user/data/report.rtf" --output "/home/user/out/report.txt"
 ```
 
-Несколько файлов:
-
-```bash
-./RtfTableExporter "/home/user/data/a.rtf" "/home/user/data/b.docx"
-```
-
-Папка с входными файлами:
-
-```bash
-./RtfTableExporter --input "/home/user/data/"
-```
-
-Маска:
-
-```bash
-./RtfTableExporter --input "/home/user/data/*.rtf"
-```
-
-Маска DOCX:
-
-```bash
-./RtfTableExporter --input "/home/user/data/*.docx"
-```
-
-Папка для результата:
+Папка:
 
 ```bash
 ./RtfTableExporter --input "/home/user/data/" --output "/home/user/out/"
 ```
 
-Один конкретный выходной файл:
+FoxPro-совместимая кодировка:
 
 ```bash
-./RtfTableExporter "/home/user/data/report.rtf" --output "/home/user/out/report.txt"
+./RtfTableExporter --foxpro --input "/home/user/data/report.rtf" --output "/home/user/out/report.txt"
 ```
 
-Свой разделитель:
+## Логи
+
+По умолчанию создается или дописывается файл:
+
+```text
+RtfTableExporter.log
+```
+
+по соседству с программой.
+
+Полезные ключи:
 
 ```bash
-./RtfTableExporter "/home/user/data/report.rtf" --delimiter ";"
-./RtfTableExporter "/home/user/data/report.rtf" --tab
-./RtfTableExporter "/home/user/data/report.rtf" --foxpro
-./RtfTableExporter "/home/user/data/report.rtf" --encoding utf8-bom
+RtfTableExporter --log-path C:\logs\RtfTableExporter.log
+RtfTableExporter --no-file-log
 ```
 
-## Запуск без окна
+Логирование не должно ломать обработку: если запись лога не удалась, конвертация продолжается.
 
-`RtfTableExporter` не скрывает консоль сам по себе. Если его запускает другая программа, окно нужно скрывать на стороне этой программы.
+## FoxPro на Linux/Wine
+
+Рекомендуемый сценарий:
+
+- использовать Windows-сборку `RtfTableExporter.exe`
+- для FoxPro/Wine брать `win-x86`
+- запускать через тот же `WINEPREFIX`, где работает FoxPro
+- передавать явные пути `Q:\...` или `Z:\...`
+- всегда передавать `--input`, `--output`, `--foxpro`, `--no-update-check`
+
+Пример:
+
+```foxpro
+LOCAL loShell, lcExe, lcInput, lcOutput, lcOutLog, lcErrLog, lcCmd, lnExitCode
+
+loShell = CREATEOBJECT("WScript.Shell")
+lcExe = "Z:\opt\RtfTableExporter\RtfTableExporter.exe"
+lcInput = "Q:\Только для обмена документами\report.rtf"
+lcOutput = "Q:\Только для обмена документами\report.txt"
+lcOutLog = "Z:\tmp\RtfTableExporter-out.log"
+lcErrLog = "Z:\tmp\RtfTableExporter-err.log"
+
+lcCmd = [cmd /c ""] + lcExe + ;
+    [" --no-update-check --foxpro --input "] + lcInput + ;
+    [" --output "] + lcOutput + ;
+    [" > "] + lcOutLog + ;
+    [" 2> "] + lcErrLog + [""]
+
+lnExitCode = loShell.Run(lcCmd, 0, .T.)
+```
+
+Если FoxPro “ничего не делает”, проверьте:
+
+1. Используется ли `win-x86`, а не `win-x64`.
+2. Совпадает ли `WINEPREFIX` у FoxPro и ручного запуска.
+3. Существуют ли нужные маппинги дисков `Q:` и `Z:`.
+4. Есть ли записи в `RtfTableExporter.log`, `RtfTableExporter-out.log` и `RtfTableExporter-err.log`.
+
+## Без окна
+
+Если нужно скрыть консоль, делайте это на стороне вызывающей программы.
 
 Visual FoxPro:
 
 ```foxpro
-LOCAL loShell, lcCommand, lnExitCode
+LOCAL loShell, lcCmd, lnExitCode
 
 loShell = CREATEOBJECT("WScript.Shell")
-lcCommand = ["] + FULLPATH("RtfTableExporter.exe") + [" --foxpro "] + ;
-    "C:\data\report.rtf" + [" "] + ;
-    "C:\out\report.txt" + ["]
+lcCmd = ["] + FULLPATH("RtfTableExporter.exe") + ;
+    [" --foxpro --no-update-check --input C:\data\report.rtf --output C:\out\report.txt"]
 
-* 0 = скрытое окно, .T. = ждать завершения
-lnExitCode = loShell.Run(lcCommand, 0, .T.)
+lnExitCode = loShell.Run(lcCmd, 0, .T.)
 ```
 
-.NET:
+PowerShell:
 
-```csharp
-var psi = new ProcessStartInfo
-{
-    FileName = @"C:\tools\RtfTableExporter.exe",
-    Arguments = @"--foxpro ""C:\data\report.rtf"" ""C:\out\report.txt""",
-    UseShellExecute = false,
-    CreateNoWindow = true,
-    RedirectStandardOutput = true,
-    RedirectStandardError = true
-};
+```powershell
+Start-Process `
+  -FilePath ".\RtfTableExporter.exe" `
+  -ArgumentList '--foxpro --no-update-check --input "C:\data\report.rtf" --output "C:\out\report.txt"' `
+  -WindowStyle Hidden
 ```
 
 Linux:
 
 ```bash
-nohup ./RtfTableExporter "/home/user/data/report.rtf" "/home/user/out/report.txt" >rtf-out.log 2>rtf-err.log &
+nohup ./RtfTableExporter --no-update-check --input "/home/user/data/report.rtf" --output "/home/user/out/report.txt" >rtf-out.log 2>rtf-err.log &
 ```
 
 ## Вывод в консоль
