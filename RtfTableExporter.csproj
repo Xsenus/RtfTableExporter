@@ -17,6 +17,12 @@
     <PackageReference Include="RtfPipe" Version="2.0.7677.4303" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <EmbeddedResource Remove="tests\**\*" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
+
   <PropertyGroup>
     <GitHubRepository Condition="'$(GitHubRepository)' == ''"></GitHubRepository>
     <RepositoryUrl Condition="'$(RepositoryUrl)' == ''">https://github.com/owner/repository</RepositoryUrl>
@@ -30,6 +36,9 @@
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>RepositoryUrl</_Parameter1>
       <_Parameter2>$(RepositoryUrl)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>RtfTableExporter.Tests</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 

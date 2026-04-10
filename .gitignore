@@ -1,5 +1,7 @@
 bin/
 obj/
+**/bin/
+**/obj/
 artifacts/
 out/
 .vs/
@@ -7,5 +9,7 @@ out/
 *.user
 *.rsuser
 *.suo
+TestResults/
+**/TestResults/
 .rtftableexporter-update.log
 .rtftableexporter-update-state.json

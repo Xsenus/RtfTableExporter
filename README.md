@@ -204,3 +204,13 @@ Bash:
 
 - Подробное использование: [docs/USAGE.md](docs/USAGE.md)
 - Что попадает в релиз и как им пользоваться: [docs/RELEASE_OVERVIEW.md](docs/RELEASE_OVERVIEW.md)
+
+## Тесты
+
+Локальная проверка:
+
+```bash
+dotnet test RtfTableExporter.sln -c Release
+```
+
+В тестах есть regression-сценарии для формы `0503152`: проверяются обычный и compatibility-варианты `RTF`, выбор корректной стратегии разбора и кодировки `cp1251`/`utf8-bom`.
