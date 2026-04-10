@@ -61,14 +61,25 @@ internal static class RtfTableConverter
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromRtf(string inputPath)
     {
-        try
+        var rawIntblRows = ParseRawRtfTableRows(inputPath, RawRtfRowCaptureMode.Intbl);
+        var rawTrowdRows = ParseRawRtfTableRows(inputPath, RawRtfRowCaptureMode.Trowd);
+        var candidates = new List<RtfExtractionCandidate>();
+
+        AddRtfCandidate(candidates, "rtf-raw-intbl", ExtractRowsForExportFromRawRows(rawIntblRows));
+        if (!AreRowsEqual(rawIntblRows, rawTrowdRows))
         {
-            return ExtractRowsForExportFromHtml(inputPath);
+            AddRtfCandidate(candidates, "rtf-raw-trowd", ExtractRowsForExportFromRawRows(rawTrowdRows));
         }
-        catch (KeyNotFoundException ex) when (IsRtfPipeTableLayoutFailure(ex))
+
+        TryAddHtmlRtfCandidate(candidates, inputPath);
+
+        if (candidates.Count == 0)
         {
-            return ExtractRowsForExportFromRawRtf(inputPath);
+            throw new NoTablesFoundException("The input file does not contain exportable data rows.");
         }
+
+        var reportKind = DetectRtfReportKind(rawIntblRows, rawTrowdRows, candidates);
+        return SelectBestRtfCandidate(candidates, reportKind).Rows;
     }
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromDocx(string inputPath)
@@ -76,6 +87,49 @@ internal static class RtfTableConverter
 
     private static bool IsRtfPipeTableLayoutFailure(KeyNotFoundException exception)
         => exception.Message.Contains("RtfPipe.UnitValue", StringComparison.Ordinal);
+
+    private static bool IsRecoverableRtfHtmlFailure(Exception exception)
+        => exception switch
+        {
+            NoTablesFoundException => true,
+            KeyNotFoundException keyNotFoundException => IsRtfPipeTableLayoutFailure(keyNotFoundException),
+            OutOfMemoryException => false,
+            StackOverflowException => false,
+            AccessViolationException => false,
+            _ => true,
+        };
+
+    private static void TryAddHtmlRtfCandidate(ICollection<RtfExtractionCandidate> candidates, string inputPath)
+    {
+        try
+        {
+            AddRtfCandidate(candidates, "rtf-html", ExtractRowsForExportFromHtml(inputPath));
+        }
+        catch (Exception ex) when (IsRecoverableRtfHtmlFailure(ex))
+        {
+        }
+    }
+
+    private static void AddRtfCandidate(
+        ICollection<RtfExtractionCandidate> candidates,
+        string strategyName,
+        IReadOnlyList<IReadOnlyList<string>> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        if (candidates.Any(candidate => AreRowsEqual(candidate.Rows, rows)))
+        {
+            return;
+        }
+
+        candidates.Add(new RtfExtractionCandidate(
+            strategyName,
+            rows,
+            AnalyzeExportRows(rows)));
+    }
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromHtml(string inputPath)
     {
@@ -226,8 +280,10 @@ internal static class RtfTableConverter
     }
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromRawRtf(string inputPath)
+        => ExtractRowsForExportFromRawRows(ParseRawRtfTableRows(inputPath));
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractRowsForExportFromRawRows(IReadOnlyList<IReadOnlyList<string>> rawRows)
     {
-        var rawRows = ParseRawRtfTableRows(inputPath);
         if (rawRows.Count == 0)
         {
             return [];
@@ -241,7 +297,106 @@ internal static class RtfTableConverter
         return NormalizeExportRows(rawRows);
     }
 
+    private static DetectedReportKind DetectRtfReportKind(
+        IReadOnlyList<IReadOnlyList<string>> rawIntblRows,
+        IReadOnlyList<IReadOnlyList<string>> rawTrowdRows,
+        IReadOnlyList<RtfExtractionCandidate> candidates)
+    {
+        var sourceRows = rawIntblRows.Count >= rawTrowdRows.Count
+            ? rawIntblRows
+            : rawTrowdRows;
+
+        if (LooksLikeForm0503152(sourceRows))
+        {
+            return DetectedReportKind.Form0503152;
+        }
+
+        if (LooksLikeForm0531857(sourceRows) ||
+            candidates.Any(candidate => candidate.Stats.Form0531857DataRowCount > 0 || candidate.Stats.Form0531857SubtotalRowCount > 0))
+        {
+            return DetectedReportKind.Form0531857;
+        }
+
+        return DetectedReportKind.Unknown;
+    }
+
+    private static RtfExtractionCandidate SelectBestRtfCandidate(
+        IReadOnlyList<RtfExtractionCandidate> candidates,
+        DetectedReportKind reportKind)
+        => candidates
+            .OrderByDescending(candidate => ScoreRtfCandidate(candidate, reportKind))
+            .ThenByDescending(candidate => candidate.Stats.RowCount)
+            .ThenByDescending(candidate => candidate.Stats.NonEmptyCellCount)
+            .First();
+
+    private static long ScoreRtfCandidate(RtfExtractionCandidate candidate, DetectedReportKind reportKind)
+        => reportKind switch
+        {
+            DetectedReportKind.Form0503152 => ScoreForm0503152Candidate(candidate.Stats),
+            DetectedReportKind.Form0531857 => ScoreForm0531857Candidate(candidate.Stats),
+            _ => ScoreGenericCandidate(candidate.Stats),
+        };
+
+    private static long ScoreForm0503152Candidate(ExportRowsStats stats)
+    {
+        var noiseRowCount = Math.Max(0, stats.RowCount - stats.Form0503152DataRowCount);
+        var lowConfidencePenalty = stats.Form0503152DataRowCount < 5 ? 100_000L : 0L;
+
+        return (stats.Form0503152DataRowCount * 10_000L) +
+               (stats.BudgetCodeRowCount * 500L) +
+               (stats.ValueRowCount * 250L) +
+               stats.NonEmptyCellCount -
+               (noiseRowCount * 100L) -
+               lowConfidencePenalty;
+    }
+
+    private static long ScoreForm0531857Candidate(ExportRowsStats stats)
+    {
+        var noiseRowCount = Math.Max(0, stats.RowCount - stats.Form0531857DataRowCount - stats.Form0531857SubtotalRowCount);
+        var lowConfidencePenalty = stats.Form0531857DataRowCount == 0 && stats.Form0531857SubtotalRowCount == 0
+            ? 100_000L
+            : 0L;
+
+        return (stats.Form0531857DataRowCount * 10_000L) +
+               (stats.Form0531857SubtotalRowCount * 15_000L) +
+               (stats.BudgetCodeRowCount * 250L) +
+               (stats.ValueRowCount * 100L) +
+               stats.NonEmptyCellCount -
+               (noiseRowCount * 250L) -
+               lowConfidencePenalty;
+    }
+
+    private static long ScoreGenericCandidate(ExportRowsStats stats)
+        => (stats.BudgetCodeRowCount * 2_000L) +
+           (stats.ValueRowCount * 1_000L) +
+           (stats.RowCount * 100L) +
+           stats.NonEmptyCellCount;
+
+    private static ExportRowsStats AnalyzeExportRows(IReadOnlyList<IReadOnlyList<string>> rows)
+    {
+        var nonEmptyCellCount = rows.Sum(row => row.Count(cell => !string.IsNullOrWhiteSpace(cell)));
+        var budgetCodeRowCount = rows.Count(row => row.Any(LooksLikeBudgetCode));
+        var valueRowCount = rows.Count(row => row.Any(LooksLikeValueCell));
+        var form0503152DataRowCount = rows.Count(row => LooksLikeForm0503152DataRow(CompactRow(row)));
+        var form0531857DataRowCount = rows.Count(LooksLikeDataRow);
+        var form0531857SubtotalRowCount = rows.Count(LooksLikeSubtotalRow);
+
+        return new ExportRowsStats(
+            rows.Count,
+            nonEmptyCellCount,
+            budgetCodeRowCount,
+            valueRowCount,
+            form0503152DataRowCount,
+            form0531857DataRowCount,
+            form0531857SubtotalRowCount);
+    }
+
     private static IReadOnlyList<IReadOnlyList<string>> ParseRawRtfTableRows(string inputPath)
+        => ParseRawRtfTableRows(inputPath, RawRtfRowCaptureMode.Intbl);
+
+    private static IReadOnlyList<IReadOnlyList<string>> ParseRawRtfTableRows(
+        string inputPath,
+        RawRtfRowCaptureMode rowCaptureMode)
     {
         var ansiEncoding = GetRtfAnsiEncoding();
         var rtf = File.ReadAllText(inputPath, ansiEncoding);
@@ -261,7 +416,11 @@ internal static class RtfTableConverter
 
             if (current != '\\')
             {
-                AppendRawRtfText(currentCell, inRow, current);
+                if (current is not '\r' and not '\n')
+                {
+                    AppendRawRtfText(currentCell, inRow, current);
+                }
+
                 continue;
             }
 
@@ -332,15 +491,26 @@ internal static class RtfTableConverter
             var hasDelimiterSpace = index < rtf.Length && rtf[index] == ' ';
             switch (word)
             {
-                case "trowd":
-                    if (inRow && (currentCell.Length > 0 || currentRow.Count > 0))
+                case "intbl":
+                    if (rowCaptureMode == RawRtfRowCaptureMode.Intbl && !inRow)
                     {
-                        AddRawRtfRow(rows, currentRow, currentCell);
+                        currentRow.Clear();
+                        currentCell.Clear();
+                        inRow = true;
                     }
 
-                    currentRow.Clear();
-                    currentCell.Clear();
-                    inRow = true;
+                    break;
+
+                case "trowd":
+                    // Some RTF variants emit row properties after the cell content, so row capture
+                    // must start on the first in-table paragraph rather than on \trowd alone.
+                    if (rowCaptureMode == RawRtfRowCaptureMode.Trowd && !inRow)
+                    {
+                        currentRow.Clear();
+                        currentCell.Clear();
+                        inRow = true;
+                    }
+
                     break;
 
                 case "cell":
@@ -494,6 +664,20 @@ internal static class RtfTableConverter
 
     private static bool LooksLikeForm0503152(IReadOnlyList<IReadOnlyList<string>> rows)
         => rows.Any(row => row.Any(cell => cell.Contains("0503152", StringComparison.OrdinalIgnoreCase)));
+
+    private static bool LooksLikeForm0531857(IReadOnlyList<IReadOnlyList<string>> rows)
+        => rows.Any(row =>
+        {
+            var rowText = NormalizeCellText(string.Join(' ', row));
+            return ContainsAnyIgnoreCase(
+                rowText,
+                "1.Доходы",
+                "1. Доходы",
+                "2.Расходы",
+                "2. Расходы",
+                "Итого по коду БК",
+                "РС‚РѕРіРѕ РїРѕ РєРѕРґСѓ Р‘Рљ");
+        });
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractForm0503152Rows(IEnumerable<IReadOnlyList<string>> rows)
         => NormalizeExportRows(rows.Where(row => LooksLikeForm0503152DataRow(CompactRow(row))));
@@ -801,6 +985,9 @@ internal static class RtfTableConverter
             ch is ',' or '.' or '-' or '+' or '(' or ')' or '/');
     }
 
+    private static bool ContainsAnyIgnoreCase(string value, params string[] patterns)
+        => patterns.Any(pattern => value.Contains(pattern, StringComparison.OrdinalIgnoreCase));
+
     private static int FindFirstNonEmptyColumn(IReadOnlyList<string> row)
     {
         for (var index = 0; index < row.Count; index++)
@@ -825,6 +1012,41 @@ internal static class RtfTableConverter
         }
 
         return -1;
+    }
+
+    private static bool AreRowsEqual(
+        IReadOnlyList<IReadOnlyList<string>> left,
+        IReadOnlyList<IReadOnlyList<string>> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var rowIndex = 0; rowIndex < left.Count; rowIndex++)
+        {
+            var leftRow = left[rowIndex];
+            var rightRow = right[rowIndex];
+            if (leftRow.Count != rightRow.Count)
+            {
+                return false;
+            }
+
+            for (var columnIndex = 0; columnIndex < leftRow.Count; columnIndex++)
+            {
+                if (!string.Equals(leftRow[columnIndex], rightRow[columnIndex], StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static void WriteRows(
@@ -981,12 +1203,39 @@ internal sealed record ParsedTopLevelTable(
     IReadOnlyList<IReadOnlyList<string>> LiveRows,
     IReadOnlyList<IReadOnlyList<string>> Rows);
 
+internal sealed record RtfExtractionCandidate(
+    string StrategyName,
+    IReadOnlyList<IReadOnlyList<string>> Rows,
+    ExportRowsStats Stats);
+
+internal sealed record ExportRowsStats(
+    int RowCount,
+    int NonEmptyCellCount,
+    int BudgetCodeRowCount,
+    int ValueRowCount,
+    int Form0503152DataRowCount,
+    int Form0531857DataRowCount,
+    int Form0531857SubtotalRowCount);
+
 internal enum TableSectionTitle
 {
     None,
     Income,
     Expense,
     Sources,
+}
+
+internal enum DetectedReportKind
+{
+    Unknown,
+    Form0503152,
+    Form0531857,
+}
+
+internal enum RawRtfRowCaptureMode
+{
+    Intbl,
+    Trowd,
 }
 
 internal sealed class NoTablesFoundException(string message) : Exception(message);
