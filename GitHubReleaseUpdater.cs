@@ -19,15 +19,22 @@ internal static class GitHubReleaseUpdater
         string workingDirectory,
         TextWriter output,
         TextWriter log,
+        AppLogger? logger,
         CancellationToken cancellationToken)
     {
         if (options.DisableAutoUpdate || !context.CanSelfUpdate || string.IsNullOrWhiteSpace(context.GitHubRepository))
         {
+            logger?.Info(
+                "Auto-update skipped.",
+                ("disabledByOption", options.DisableAutoUpdate),
+                ("canSelfUpdate", context.CanSelfUpdate),
+                ("repositoryConfigured", !string.IsNullOrWhiteSpace(context.GitHubRepository)));
             return AutoUpdateExecutionResult.NotHandled;
         }
 
         if (!CanWriteToDirectory(context.BaseDirectory))
         {
+            logger?.Warning("Auto-update skipped because the application directory is not writable.", ("baseDirectory", context.BaseDirectory));
             await SafeWriteLineAsync(log, $"UPDATE|Application directory is not writable: {context.BaseDirectory}");
             return AutoUpdateExecutionResult.NotHandled;
         }
@@ -36,6 +43,12 @@ internal static class GitHubReleaseUpdater
 
         try
         {
+            logger?.Info(
+                "Checking GitHub release updates.",
+                ("repository", context.GitHubRepository ?? string.Empty),
+                ("currentVersion", context.CurrentVersion),
+                ("runtime", context.RuntimeIdentifier));
+
             GitHubRelease? latestRelease;
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
@@ -45,18 +58,31 @@ internal static class GitHubReleaseUpdater
 
             PersistState(statePath, context, latestRelease?.TagName);
 
+            logger?.Info(
+                "Latest release lookup completed.",
+                ("latestTag", latestRelease?.TagName ?? string.Empty));
+
             if (latestRelease is null || !IsNewerVersion(latestRelease.TagName, context.CurrentVersion))
             {
+                logger?.Info("No newer release is available.");
                 return AutoUpdateExecutionResult.NotHandled;
             }
 
             var asset = SelectAsset(latestRelease, context);
             if (asset is null)
             {
+                logger?.Warning(
+                    "No compatible update asset was found.",
+                    ("latestTag", latestRelease.TagName),
+                    ("runtime", DescribeRuntime(context)));
                 await SafeWriteLineAsync(log, $"UPDATE|No compatible release asset was found for {DescribeRuntime(context)}.");
                 return AutoUpdateExecutionResult.NotHandled;
             }
 
+            logger?.Info(
+                "Compatible update asset selected.",
+                ("latestTag", latestRelease.TagName),
+                ("assetName", asset.Name));
             await SafeWriteLineAsync(log, $"UPDATE|Applying update {latestRelease.TagName} before processing.");
             var updateResult = await DownloadScheduleAndRunUpdatedAsync(
                 asset,
@@ -65,17 +91,24 @@ internal static class GitHubReleaseUpdater
                 workingDirectory,
                 output,
                 log,
+                logger,
                 cancellationToken);
 
+            logger?.Info(
+                "Auto-update execution finished.",
+                ("handled", updateResult.Handled),
+                ("exitCode", updateResult.ExitCode));
             return updateResult;
         }
         catch (OperationCanceledException)
         {
+            logger?.Warning("Auto-update lookup timed out.", ("timeoutSeconds", RequestTimeout.TotalSeconds));
             // Silent timeout to avoid slowing normal use.
             return AutoUpdateExecutionResult.NotHandled;
         }
         catch (Exception ex)
         {
+            logger?.Error("Auto-update failed.", ex);
             AppendUpdateLog(context.BaseDirectory, $"[{DateTimeOffset.UtcNow:O}] {ex}");
             await SafeWriteLineAsync(log, $"UPDATE|{ex.Message}");
             return AutoUpdateExecutionResult.NotHandled;
@@ -183,11 +216,13 @@ internal static class GitHubReleaseUpdater
         string workingDirectory,
         TextWriter output,
         TextWriter log,
+        AppLogger? logger,
         CancellationToken cancellationToken)
     {
         var processPath = context.ProcessPath;
         if (string.IsNullOrWhiteSpace(processPath))
         {
+            logger?.Warning("Auto-update skipped because the process path is empty.");
             return AutoUpdateExecutionResult.NotHandled;
         }
 
@@ -201,6 +236,7 @@ internal static class GitHubReleaseUpdater
         try
         {
             Directory.CreateDirectory(extractPath);
+            logger?.Info("Created temporary update directory.", ("tempRoot", tempRoot));
 
             await PersistResumeStateAsync(
                 resumeStatePath,
@@ -208,6 +244,7 @@ internal static class GitHubReleaseUpdater
                 restartArguments,
                 acknowledgementPath,
                 cancellationToken);
+            logger?.Info("Persisted resume state for the updated version.", ("resumeStatePath", resumeStatePath));
 
             using (var client = new HttpClient())
             {
@@ -216,12 +253,15 @@ internal static class GitHubReleaseUpdater
                 await using var destination = File.Create(archivePath);
                 await source.CopyToAsync(destination, cancellationToken);
             }
+            logger?.Info("Downloaded update package.", ("archivePath", archivePath), ("assetName", asset.Name));
 
             ZipFile.ExtractToDirectory(archivePath, extractPath, overwriteFiles: true);
+            logger?.Info("Extracted update package.", ("extractPath", extractPath));
 
             var targetBinaryName = Path.GetFileName(processPath);
             if (string.IsNullOrWhiteSpace(targetBinaryName))
             {
+                logger?.Warning("Auto-update skipped because the target binary name could not be resolved.");
                 return AutoUpdateExecutionResult.NotHandled;
             }
 
@@ -234,6 +274,10 @@ internal static class GitHubReleaseUpdater
 
             var updatedBinaryPath = Path.Combine(extractPath, sourceBinaryName);
             EnsureBinaryIsExecutable(updatedBinaryPath);
+            logger?.Info(
+                "Prepared updated binary for launch.",
+                ("updatedBinaryPath", updatedBinaryPath),
+                ("targetBinaryName", targetBinaryName));
 
             var updateResult = await RunUpdatedBinaryAsync(
                 updatedBinaryPath,
@@ -242,6 +286,7 @@ internal static class GitHubReleaseUpdater
                 workingDirectory,
                 output,
                 log,
+                logger,
                 token => SchedulePermanentInstallAsync(
                     extractPath,
                     context.BaseDirectory,
@@ -249,6 +294,7 @@ internal static class GitHubReleaseUpdater
                     sourceBinaryName,
                     targetBinaryName,
                     log,
+                    logger,
                     token),
                 cancellationToken);
 
@@ -259,6 +305,7 @@ internal static class GitHubReleaseUpdater
         {
             if (!keepTempRoot)
             {
+                logger?.Info("Cleaning temporary update directory.", ("tempRoot", tempRoot));
                 TryDeleteDirectory(tempRoot);
             }
         }
@@ -395,6 +442,7 @@ exit "$EXIT_CODE"
         string workingDirectory,
         TextWriter output,
         TextWriter log,
+        AppLogger? logger,
         Func<CancellationToken, Task> schedulePermanentInstallAsync,
         CancellationToken cancellationToken)
     {
@@ -412,6 +460,11 @@ exit "$EXIT_CODE"
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Failed to start updated binary: {updatedBinaryPath}");
+        logger?.Info(
+            "Started updated binary.",
+            ("updatedBinaryPath", updatedBinaryPath),
+            ("pid", process.Id),
+            ("resumeStatePath", resumeStatePath));
 
         var outputTask = PumpReaderAsync(process.StandardOutput, output, cancellationToken);
         var errorTask = PumpReaderAsync(process.StandardError, log, cancellationToken);
@@ -419,6 +472,7 @@ exit "$EXIT_CODE"
         var takeoverConfirmed = await WaitForTakeoverAsync(process, acknowledgementPath, cancellationToken);
         if (!takeoverConfirmed)
         {
+            logger?.Warning("Updated version did not confirm takeover.", ("updatedBinaryPath", updatedBinaryPath));
             TryStopProcess(process);
             await process.WaitForExitAsync(CancellationToken.None);
             await Task.WhenAll(outputTask, errorTask);
@@ -426,9 +480,11 @@ exit "$EXIT_CODE"
             return AutoUpdateExecutionResult.NotHandled;
         }
 
+        logger?.Info("Updated version confirmed takeover.", ("acknowledgementPath", acknowledgementPath));
         await schedulePermanentInstallAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);
         await Task.WhenAll(outputTask, errorTask);
+        logger?.Info("Updated binary finished.", ("exitCode", process.ExitCode));
         return new AutoUpdateExecutionResult(Handled: true, ExitCode: process.ExitCode);
     }
 
@@ -522,6 +578,7 @@ exit "$EXIT_CODE"
         string sourceBinaryName,
         string targetBinaryName,
         TextWriter log,
+        AppLogger? logger,
         CancellationToken cancellationToken)
     {
         var logPath = Path.Combine(targetDirectory, ".rtftableexporter-update.log");
@@ -542,24 +599,27 @@ exit "$EXIT_CODE"
                         logPath),
                     cancellationToken);
                 StartDetachedProcess("powershell", $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"");
+                logger?.Info("Scheduled permanent update installation.", ("scriptPath", scriptPath));
                 return;
             }
 
             var shellScriptPath = Path.Combine(Path.GetDirectoryName(sourceDirectory)!, "apply-update.sh");
             await File.WriteAllTextAsync(
                 shellScriptPath,
-                BuildLinuxScript(
-                    sourceDirectory,
-                    targetDirectory,
-                    processId,
-                    sourceBinaryName,
+                    BuildLinuxScript(
+                        sourceDirectory,
+                        targetDirectory,
+                        processId,
+                        sourceBinaryName,
                     targetBinaryName,
-                    logPath),
+                        logPath),
                 cancellationToken);
             StartDetachedProcess("/bin/sh", $"\"{shellScriptPath}\"");
+            logger?.Info("Scheduled permanent update installation.", ("scriptPath", shellScriptPath));
         }
         catch (Exception ex)
         {
+            logger?.Error("Failed to schedule permanent update installation.", ex, ("targetDirectory", targetDirectory));
             AppendUpdateLog(targetDirectory, $"[{DateTimeOffset.UtcNow:O}] Failed to schedule permanent update install: {ex}");
             await SafeWriteLineAsync(log, "UPDATE|Failed to schedule permanent installation of the new version.");
         }

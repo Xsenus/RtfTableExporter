@@ -14,6 +14,10 @@ internal sealed class CliOptions
 
     public bool DisableAutoUpdate { get; init; }
 
+    public bool DisableFileLog { get; init; }
+
+    public string? LogPath { get; init; }
+
     public string? GitHubRepositoryOverride { get; init; }
 
     public static CliOptions Parse(string[] args)
@@ -23,6 +27,8 @@ internal sealed class CliOptions
         var delimiter = "|";
         var outputEncoding = TextFileEncodingKind.Cp1251;
         var disableAutoUpdate = false;
+        var disableFileLog = false;
+        string? logPath = null;
         string? gitHubRepositoryOverride = null;
 
         for (var i = 0; i < args.Length; i++)
@@ -38,6 +44,8 @@ internal sealed class CliOptions
                         Inputs = Array.Empty<string>(),
                         Delimiter = delimiter,
                         OutputEncoding = outputEncoding,
+                        DisableFileLog = disableFileLog,
+                        LogPath = logPath,
                     };
 
                 case "-i":
@@ -78,6 +86,16 @@ internal sealed class CliOptions
                     disableAutoUpdate = true;
                     break;
 
+                case "--no-file-log":
+                case "--no-log-file":
+                    disableFileLog = true;
+                    break;
+
+                case "--log-path":
+                case "--log-file":
+                    logPath = ReadValue(args, ref i, arg);
+                    break;
+
                 case "--largest-table":
                     break;
 
@@ -103,8 +121,38 @@ internal sealed class CliOptions
             Delimiter = delimiter,
             OutputEncoding = outputEncoding,
             DisableAutoUpdate = disableAutoUpdate,
+            DisableFileLog = disableFileLog,
+            LogPath = logPath,
             GitHubRepositoryOverride = gitHubRepositoryOverride,
         };
+    }
+
+    public static BootstrapLoggingOptions ParseBootstrapLoggingOptions(string[] args)
+    {
+        var disableFileLog = false;
+        string? logPath = null;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--no-file-log":
+                case "--no-log-file":
+                    disableFileLog = true;
+                    break;
+
+                case "--log-path":
+                case "--log-file":
+                    if (i + 1 < args.Length)
+                    {
+                        logPath = args[++i];
+                    }
+
+                    break;
+            }
+        }
+
+        return new BootstrapLoggingOptions(disableFileLog, logPath);
     }
 
     private static string ReadValue(string[] args, ref int index, string optionName)

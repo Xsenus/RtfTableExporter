@@ -2,11 +2,26 @@ namespace RtfTableExporter;
 
 internal static class BatchProcessor
 {
-    public static BatchRunResult Run(CliOptions options, AppRuntimeContext context)
+    public static BatchRunResult Run(CliOptions options, AppRuntimeContext context, AppLogger? logger = null)
     {
+        logger?.Info("Starting input discovery.");
         var discovery = DiscoverInputFiles(options, context);
+        logger?.Info(
+            "Input discovery finished.",
+            ("fileCount", discovery.Files.Count),
+            ("failureCount", discovery.Failures.Count));
+
+        foreach (var failure in discovery.Failures)
+        {
+            logger?.Warning(
+                "Input discovery issue.",
+                ("inputPath", failure.InputPath),
+                ("message", failure.Message));
+        }
+
         if (discovery.Files.Count == 0)
         {
+            logger?.Warning("No supported input files were found.", ("baseDirectory", context.BaseDirectory));
             return new BatchRunResult(
                 Array.Empty<FileSuccess>(),
                 discovery.Failures,
@@ -14,6 +29,10 @@ internal static class BatchProcessor
         }
 
         var outputTarget = ResolveOutputTarget(options.OutputPath, discovery.Files.Count, context.BaseDirectory);
+        logger?.Info(
+            "Resolved output target.",
+            ("outputKind", outputTarget.Kind),
+            ("outputPath", outputTarget.Path));
         EnsureOutputLocationExists(outputTarget);
 
         var successes = new List<FileSuccess>();
@@ -27,15 +46,34 @@ internal static class BatchProcessor
 
             try
             {
+                logger?.Info(
+                    "Starting file conversion.",
+                    ("inputPath", inputFile),
+                    ("outputPath", outputPath));
                 var result = RtfTableConverter.Convert(inputFile, outputPath, options.Delimiter, options.OutputEncoding);
                 successes.Add(new FileSuccess(result.InputPath, result.OutputPath, result.RowCount, result.ColumnCount));
+                logger?.Info(
+                    "File conversion completed.",
+                    ("inputPath", result.InputPath),
+                    ("outputPath", result.OutputPath),
+                    ("rowCount", result.RowCount),
+                    ("columnCount", result.ColumnCount));
             }
             catch (Exception ex)
             {
                 failures.Add(new FileFailure(inputFile, outputPath, ex.Message));
+                logger?.Error(
+                    "File conversion failed.",
+                    ex,
+                    ("inputPath", inputFile),
+                    ("outputPath", outputPath));
             }
         }
 
+        logger?.Info(
+            "Batch processing finished.",
+            ("successCount", successes.Count),
+            ("failureCount", failures.Count));
         return new BatchRunResult(successes, failures, NoInputFilesFound: false);
     }
 

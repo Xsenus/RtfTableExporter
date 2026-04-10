@@ -10,17 +10,52 @@ internal static class Program
         Console.InputEncoding = new UTF8Encoding(false);
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
+        AppLogger? logger = null;
+
         try
         {
             var launchContext = LaunchContextResolver.Resolve(args);
             Environment.CurrentDirectory = launchContext.WorkingDirectory;
 
+            var bootstrapContext = AppRuntimeContext.Create(repositoryOverride: null);
+            var bootstrapLoggingOptions = CliOptions.ParseBootstrapLoggingOptions(launchContext.EffectiveArgs);
+            logger = AppLogger.Create(bootstrapContext.ApplicationName, bootstrapContext.BaseDirectory, bootstrapLoggingOptions);
+
+            logger.Info(
+                "Application started.",
+                ("pid", Environment.ProcessId),
+                ("version", bootstrapContext.CurrentVersion),
+                ("runtime", bootstrapContext.RuntimeIdentifier),
+                ("workingDirectory", launchContext.WorkingDirectory),
+                ("baseDirectory", bootstrapContext.BaseDirectory),
+                ("processPath", bootstrapContext.ProcessPath ?? string.Empty),
+                ("logPath", logger.LogPath ?? string.Empty),
+                ("args", AppLogger.FormatCommandLine(launchContext.EffectiveArgs)));
+
             var options = CliOptions.Parse(launchContext.EffectiveArgs);
-            var context = AppRuntimeContext.Create(options.GitHubRepositoryOverride);
+            var context = string.IsNullOrWhiteSpace(options.GitHubRepositoryOverride)
+                ? bootstrapContext
+                : AppRuntimeContext.Create(options.GitHubRepositoryOverride);
+
+            logger.Info(
+                "Command line parsed.",
+                ("inputCount", options.Inputs.Count),
+                ("outputPath", options.OutputPath ?? string.Empty),
+                ("delimiter", options.Delimiter == "\t" ? "\\t" : options.Delimiter),
+                ("encoding", options.OutputEncoding),
+                ("autoUpdateDisabled", options.DisableAutoUpdate),
+                ("fileLogDisabled", options.DisableFileLog),
+                ("gitHubRepository", context.GitHubRepository ?? string.Empty));
+
             LaunchContextResolver.AcknowledgeResume(launchContext);
+            if (!string.IsNullOrWhiteSpace(launchContext.AcknowledgementPath))
+            {
+                logger.Info("Updated version takeover acknowledged.", ("acknowledgementPath", launchContext.AcknowledgementPath));
+            }
 
             if (options.ShowHelp)
             {
+                logger.Info("Help requested.");
                 WriteUsage();
                 return 0;
             }
@@ -32,14 +67,16 @@ internal static class Program
                 launchContext.WorkingDirectory,
                 Console.Out,
                 Console.Error,
+                logger,
                 CancellationToken.None);
 
             if (updateResult.Handled)
             {
+                logger.Info("Execution completed by updated version.", ("exitCode", updateResult.ExitCode));
                 return updateResult.ExitCode;
             }
 
-            var result = BatchProcessor.Run(options, context);
+            var result = BatchProcessor.Run(options, context, logger);
 
             foreach (var success in result.Successes)
             {
@@ -61,18 +98,30 @@ internal static class Program
             }
 
             Console.Out.WriteLine($"SUMMARY|{result.Successes.Count}|{result.Failures.Count}");
+            logger.Info(
+                "Application finished.",
+                ("exitCode", result.ExitCode),
+                ("successCount", result.Successes.Count),
+                ("failureCount", result.Failures.Count),
+                ("noInputFilesFound", result.NoInputFilesFound));
             return result.ExitCode;
         }
         catch (CliException ex)
         {
+            logger?.Error("Invalid command line.", ex, ("args", AppLogger.FormatCommandLine(args)));
             Console.Error.WriteLine(ex.Message);
             WriteUsage();
             return 1;
         }
         catch (Exception ex)
         {
+            logger?.Error("Fatal application error.", ex);
             Console.Error.WriteLine(ex.Message);
             return 4;
+        }
+        finally
+        {
+            logger?.Dispose();
         }
     }
 
@@ -106,6 +155,8 @@ internal static class Program
         Console.WriteLine("      --encoding <value>     Output encoding: cp1251, utf8, utf8-bom. Default is cp1251.");
         Console.WriteLine("      --foxpro               Shortcut for --encoding cp1251.");
         Console.WriteLine("      --tab                  Shortcut for TAB separator.");
+        Console.WriteLine("      --log-path <file>      File log path. Default is RtfTableExporter.log next to the executable.");
+        Console.WriteLine("      --no-file-log          Disable file logging for this run.");
         Console.WriteLine("      --github-repo <repo>   GitHub repo in owner/name format for self-update.");
         Console.WriteLine("      --no-update-check      Disable GitHub release update check for this run.");
         Console.WriteLine("      --largest-table        Accepted for compatibility, no effect.");
